@@ -1,0 +1,5 @@
+{
+  "name": "UnityBench.Minimal.Editor",
+  "references": ["UnityBench.Editor"],
+  "includePlatforms": ["Editor"]
+}

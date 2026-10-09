@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tesselworks-unity-bench"
+version = "0.1.0"
+description = "Explicit Unity benchmark campaigns with retained evidence and project adapters"
+requires-python = ">=3.10"
+
+[project.scripts]
+unity-bench = "unity_bench.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

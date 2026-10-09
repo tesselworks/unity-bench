@@ -1,0 +1,7 @@
+{
+  "name": "com.tesselworks.unity-bench",
+  "version": "0.1.0",
+  "displayName": "Tessel Works Unity Bench",
+  "description": "Explicit batch benchmark workload registration and result protocol. Private extraction preview; no public license grant.",
+  "unity": "6000.0"
+}

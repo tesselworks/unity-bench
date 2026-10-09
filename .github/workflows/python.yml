@@ -1,0 +1,18 @@
+name: Portable framework contract
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  contract:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Require existing Python 3.10 or newer
+        run: python -c 'import sys; assert sys.version_info >= (3, 10)'
+      - name: Exercise independent checkout, protocol and owned process tests
+        run: python -I -m unittest discover -s tests
