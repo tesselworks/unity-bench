@@ -1,9 +1,3 @@
----
-type: guide
-date: 2026-10-10
-tags: [unity, benchmark, framework]
----
-
 # Unity Bench
 
 Compare the same Unity project across Editor versions or player backends, using a fixed execution plan and project-defined workloads.
