@@ -119,6 +119,32 @@ def _check(success, message):
         raise RuntimeError(message)
 
 
+FAILURE_STAGES = frozenset({'launch', 'callback-started', 'callback-poll', 'cleanup-job',
+                            'cleanup-fallback', 'close-job', 'callback-finished', 'cleanup-handles'})
+FAILURE_TYPES = frozenset({'Exception', 'OSError', 'ValueError', 'RuntimeError', 'TimeoutError', 'KeyError',
+                           'TypeError', 'OverflowError', 'AttributeError', 'MemoryError', 'KeyboardInterrupt',
+                           'SystemExit', 'FileNotFoundError', 'FileExistsError', 'PermissionError',
+                           'ProcessLookupError', 'InterruptedError', 'BrokenPipeError', 'ConnectionResetError',
+                           'NotADirectoryError', 'IsADirectoryError'})
+
+
+def failure_details(error):
+    """Safe type/stage metadata only; never exception text, argv or paths."""
+    rows = getattr(error, 'unity_bench_failures', None)
+    if type(rows) is not list or len(rows) > 32:
+        return []
+    return [{'stage': row['stage'], 'type': row['type']} for row in rows
+            if type(row) is dict and set(row) == {'stage', 'type'}
+            and type(row.get('stage')) is str and row['stage'] in FAILURE_STAGES
+            and type(row.get('type')) is str and row['type'] in FAILURE_TYPES]
+
+
+def _record_failure(details, error, stage):
+    label = type(error).__name__
+    details.append({'stage': stage, 'type': label if label in FAILURE_TYPES else 'Exception'})
+    error.unity_bench_failures = [dict(row) for row in details]
+
+
 def _cleanup_job(api, job, process):
     _check(api.TerminateJobObject(job, 1), 'Owned Windows job could not be terminated')
     deadline = time.monotonic() + 2
@@ -162,6 +188,7 @@ def launch_windows(argv, cwd, timeout, on_started=None, on_poll=None, on_finishe
     initialized = False
     started = False
     info = ProcessInformation()
+    original_failure = None; details = []; stage = 'launch'
     try:
         job = api.CreateJobObjectW(None, None)
         _check(job, 'Owned Windows job could not be created')
@@ -202,7 +229,9 @@ def launch_windows(argv, cwd, timeout, on_started=None, on_poll=None, on_finishe
                'Owned Windows adapter job association could not be verified')
         started = True
         if on_started is not None:
+            stage = 'callback-started'
             on_started(int(info.dwProcessId))
+            stage = 'launch'
         # CREATE_SUSPENDED begins with exactly one suspension. Any unexpected
         # suspension count is a hard error; cleanup still owns the whole job.
         _check(api.ResumeThread(info.hThread) == 1, 'Owned Windows adapter could not be resumed')
@@ -217,37 +246,68 @@ def launch_windows(argv, cwd, timeout, on_started=None, on_poll=None, on_finishe
             if wait != WAIT_TIMEOUT:
                 raise RuntimeError('Owned Windows adapter wait failed')
             if on_poll is not None:
+                stage = 'callback-poll'
                 on_poll()
+                stage = 'launch'
         code = DWORD()
         _check(api.GetExitCodeProcess(info.hProcess, ctypes.byref(code)), 'Owned Windows adapter exit code is unavailable')
         return_code, pid = int(code.value), int(info.dwProcessId)
+    except BaseException as error:
+        original_failure = error
+        _record_failure(details, error, stage)
+        raise
     finally:
+        cleanup_recorded = None
         try:
             if info.hProcess:
                 try:
+                    stage = 'cleanup-job'
                     _cleanup_job(api, job, info.hProcess)
-                except BaseException:
-                    # Retain the direct owned handle as a fallback even when
-                    # job association/cleanup verification failed. Reap the
-                    # suspended primary before propagating the hard failure.
+                except BaseException as error:
+                    _record_failure(details, error, stage); cleanup_recorded = error
+                    # Preserve the same owned fallback and its hard refusal.
+                    stage = 'cleanup-fallback'
                     api.TerminateProcess(info.hProcess, 1)
                     if api.WaitForSingleObject(info.hProcess, 2000) != WAIT_OBJECT_0:
                         raise RuntimeError('Owned Windows primary fallback cleanup did not complete') from None
                     raise
             if job:
+                stage = 'close-job'
                 _check(api.CloseHandle(job), 'Owned Windows job handle could not be closed')
                 job = None
             if started and on_finished is not None:
-                on_finished()
+                stage = 'callback-finished'
+                try:
+                    on_finished()
+                except BaseException as error:
+                    _record_failure(details, error, stage); cleanup_recorded = error
+                    if original_failure is not None and isinstance(error, Exception):
+                        # Verified job cleanup has already finished. Keep the
+                        # original observation/launch failure as the headline,
+                        # retaining this independent callback failure as metadata.
+                        original_failure.unity_bench_failures = [dict(row) for row in details]
+                        raise original_failure from error
+                    raise
+        except BaseException as error:
+            if error is not cleanup_recorded and error is not original_failure:
+                _record_failure(details, error, stage)
+            else:
+                error.unity_bench_failures = [dict(row) for row in details]
+            raise
         finally:
-            if job:
-                api.CloseHandle(job)  # KILL_ON_JOB_CLOSE remains the final safety net.
-            if info.hThread:
-                api.CloseHandle(info.hThread)
-            if info.hProcess:
-                api.CloseHandle(info.hProcess)
-            if null_handle and null_handle != INVALID_HANDLE_VALUE:
-                api.CloseHandle(null_handle)
-            if initialized:
-                api.DeleteProcThreadAttributeList(attributes)
+            try:
+                stage = 'cleanup-handles'
+                if job:
+                    api.CloseHandle(job)  # KILL_ON_JOB_CLOSE remains the final safety net.
+                if info.hThread:
+                    api.CloseHandle(info.hThread)
+                if info.hProcess:
+                    api.CloseHandle(info.hProcess)
+                if null_handle and null_handle != INVALID_HANDLE_VALUE:
+                    api.CloseHandle(null_handle)
+                if initialized:
+                    api.DeleteProcThreadAttributeList(attributes)
+            except BaseException as error:
+                _record_failure(details, error, stage)
+                raise
     return return_code, (time.perf_counter() - start) * 1000, pid

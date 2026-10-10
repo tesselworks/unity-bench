@@ -322,6 +322,49 @@ class WindowsHostTests(unittest.TestCase):
             self.assertEqual(123, failure['descriptor']['parentPid']); self.assertTrue(failure['error'])
             self.assertNotIn(124, probe.owned_sync_handles)
 
+    def test_first_open_failure_records_immediate_error_access_and_anchor_without_retry(self):
+        for native_error in (5, 87):
+            probe = self.controlled_tree_probe()
+            probe.api.OpenProcess.side_effect = lambda *args: 0
+            probe.last_error = Mock(return_value=native_error)
+            with self.subTest(error=native_error), self.assertRaises(OSError):
+                probe.snapshot()
+            failure = probe.probe_failures[-1]
+            self.assertEqual([{'api': 'OpenProcess', 'requestedAccess': 0x101000,
+                'success': False, 'errorCode': native_error, 'hadExistingHandle': False,
+                'existingAccess': None, 'hadAnchor': False}], failure['nativeQueries'])
+            self.assertIsNone(failure['known'])
+            probe.api.OpenProcess.assert_called_once_with(0x101000, False, 124)
+            probe.api.GetProcessTimes.assert_not_called()
+            self.assertNotIn(124, probe.owned_sync_handles)
+
+    def test_creation_failure_records_immediate_api_error_without_adoption(self):
+        probe = self.controlled_tree_probe()
+        probe.api.GetProcessTimes.side_effect = lambda *args: 0
+        probe.last_error = Mock(return_value=6)
+        with self.assertRaises(OSError): probe.snapshot()
+        failure = probe.probe_failures[-1]
+        self.assertEqual('query-creation', failure['stage'])
+        self.assertEqual({'api': 'GetProcessTimes', 'success': False, 'errorCode': 6,
+                          'startedUnix': None}, failure['nativeQueries'][-1])
+        self.assertEqual({'api': 'OpenProcess', 'requestedAccess': 0x101000, 'success': True,
+                          'errorCode': 0, 'hadExistingHandle': False, 'existingAccess': None,
+                          'hadAnchor': False}, failure['nativeQueries'][0])
+        probe.api.OpenProcess.assert_called_once()
+        self.assertNotIn(124, probe.owned_sync_handles)
+        self.assertIsNone(failure['known'])
+
+    def test_retained_wrong_access_records_mismatch_without_reopening_or_retry(self):
+        probe = self.controlled_tree_probe()
+        probe.handles[124] = 1124; probe.handle_access[124] = 0x1000
+        with self.assertRaises(OSError): probe.snapshot()
+        failure = probe.probe_failures[-1]
+        self.assertEqual([{'api': 'RetainedHandle', 'requestedAccess': 0x101000,
+                          'available': True, 'hadExistingHandle': True,
+                          'existingAccess': 0x1000, 'hadAnchor': False}], failure['nativeQueries'])
+        probe.api.OpenProcess.assert_not_called()
+        probe.api.GetProcessTimes.assert_not_called()
+
     def test_anchored_object_can_signal_during_query_without_becoming_live_or_needing_fresh_image(self):
         probe = self.controlled_tree_probe(); probe.snapshot()
         probe.api.Process32NextW.side_effect = lambda *a: 0

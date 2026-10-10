@@ -11,6 +11,7 @@ from .evidence import machine_lock, write
 from .report import summarize, validate_result
 from .process import launch
 from .host import HostSession
+from .windows_process import failure_details
 
 
 def git(repository, *args):
@@ -98,8 +99,12 @@ def _run(config_path, destination):
                   {'variant': row['variant'], 'workload': row['workload'], 'completed': True})
             prepared.add(identity)
         except (OSError, ValueError, KeyError, RuntimeError, TimeoutError) as error:
-            write(directory/'execution.json', {'status': 'failed', 'kind': row['kind'], 'stage': 'preparation',
-                  'hostObservation': 'unavailable', 'requestDigest': digest(request), 'error': type(error).__name__})
+            failure = {'status': 'failed', 'kind': row['kind'], 'stage': 'preparation',
+                       'hostObservation': 'unavailable', 'requestDigest': digest(request), 'error': type(error).__name__}
+            details = failure_details(error)
+            if details:
+                failure['failureDetails'] = details
+            write(directory/'execution.json', failure)
             return complete_report(destination)
     for row, variant, workload, checkout, project, directory, request, fields in contexts:
         execution = {'status': 'failed', 'kind': row['kind'], 'hostObservation': 'unavailable', 'requestDigest': digest(request)}
@@ -127,6 +132,9 @@ def _run(config_path, destination):
         except (OSError, ValueError, KeyError, RuntimeError, TimeoutError, json.JSONDecodeError) as error:
             # Error types are safe; arbitrary adapter/Unity strings never enter public reports.
             execution['error'] = type(error).__name__
+            details = failure_details(error)
+            if details:
+                execution['failureDetails'] = details
         finally:
             if host is not None:
                 summary = host.finish()

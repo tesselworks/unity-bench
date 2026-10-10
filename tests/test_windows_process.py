@@ -185,6 +185,72 @@ class WindowsProcessMockTests(unittest.TestCase):
         self.assertIn('closed-201', api.events)
         api.TerminateProcess.assert_called_with(301, 1)
 
+    def test_poll_and_finished_failures_preserve_original_and_safe_details(self):
+        api = fake_api()
+        original = OSError('sensitive original path/credential')
+        def poll(): raise original
+        def finished():
+            self.assertIn('terminated-job', api.events)
+            self.assertIn('closed-201', api.events)
+            raise ValueError('sensitive secondary path/credential')
+        with self.assertRaises(OSError) as caught:
+            self.launch(api, on_poll=poll, on_finished=finished)
+        self.assertIs(original, caught.exception)
+        details = WINDOWS.failure_details(caught.exception)
+        self.assertEqual([{'stage': 'callback-poll', 'type': 'OSError'},
+                          {'stage': 'callback-finished', 'type': 'ValueError'}], details)
+        self.assertNotIn('sensitive', str(details))
+        self.assertEqual({201, 202, 301, 302}, {call.args[0] for call in api.CloseHandle.call_args_list})
+        api.DeleteProcThreadAttributeList.assert_called_once()
+
+    def test_started_failure_and_finished_failure_never_resume_user_code(self):
+        api = fake_api(); original = OSError('initial observer')
+        api.WaitForSingleObject.side_effect = None
+        api.WaitForSingleObject.return_value = WINDOWS.WAIT_OBJECT_0
+        def started(pid): raise original
+        def finished(): raise ValueError('missing ready on aborted startup')
+        with self.assertRaises(OSError) as caught:
+            self.launch(api, on_started=started, on_finished=finished)
+        self.assertIs(caught.exception, original)
+        api.ResumeThread.assert_not_called()
+        self.assertEqual(['callback-started', 'callback-finished'],
+                         [row['stage'] for row in WINDOWS.failure_details(caught.exception)])
+
+    def test_actual_job_cleanup_failure_remains_hard_and_keeps_original(self):
+        api = fake_api(); original = OSError('native observation failed')
+        def poll(): raise original
+        api.QueryInformationJobObject.side_effect = None
+        api.QueryInformationJobObject.return_value = 0
+        # poll timeout, then original owned fallback reaps the direct process.
+        api.WaitForSingleObject.side_effect = [WINDOWS.WAIT_TIMEOUT, WINDOWS.WAIT_OBJECT_0]
+        finished = Mock()
+        with self.assertRaisesRegex(RuntimeError, 'cleanup could not be verified') as caught:
+            self.launch(api, on_poll=poll, on_finished=finished)
+        self.assertEqual([{'stage': 'callback-poll', 'type': 'OSError'},
+                          {'stage': 'cleanup-job', 'type': 'RuntimeError'}], WINDOWS.failure_details(caught.exception))
+        finished.assert_not_called()
+        api.TerminateProcess.assert_called_with(301, 1)
+        self.assertIn('closed-201', api.events)
+
+    def test_finished_failure_on_success_still_refuses(self):
+        api = fake_api()
+        def finished(): raise ValueError('invalid observer completion')
+        with self.assertRaises(ValueError) as caught:
+            self.launch(api, on_finished=finished)
+        self.assertEqual([{'stage': 'callback-finished', 'type': 'ValueError'}], WINDOWS.failure_details(caught.exception))
+
+    def test_safe_metadata_filters_unknown_types_stages_extra_fields_and_bound(self):
+        error = OSError('private')
+        error.unity_bench_failures = [
+            {'stage': 'callback-poll', 'type': 'OSError'},
+            {'stage': 'password=secret', 'type': 'ValueError'},
+            {'stage': 'launch', 'type': 'secret-type'},
+            {'stage': 'launch', 'type': 'RuntimeError', 'message': 'secret'}]
+        self.assertEqual([{'stage': 'callback-poll', 'type': 'OSError'}], WINDOWS.failure_details(error))
+        error.unity_bench_failures = [{'stage': 'launch', 'type': 'RuntimeError'}] * 33
+        self.assertEqual([], WINDOWS.failure_details(error))
+
+
 
 @unittest.skipUnless(os.name == 'nt', 'Requires native Windows Job Object APIs')
 class WindowsProcessNativeTests(unittest.TestCase):

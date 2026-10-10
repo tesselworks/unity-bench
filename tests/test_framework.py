@@ -78,6 +78,40 @@ class FrameworkTests(unittest.TestCase):
         self.assertEqual(['whole-process-wall/process'], list(metrics))
         self.assertGreater(metrics['whole-process-wall/process']['minMs'], 0)
 
+    def test_cleanup_refusal_retains_safe_original_failure_without_replacement(self):
+        error = RuntimeError('private path and arbitrary exception text')
+        error.unity_bench_failures = [
+            {'stage': 'callback-poll', 'type': 'OSError'},
+            {'stage': 'cleanup-job', 'type': 'RuntimeError'},
+            {'stage': 'private path', 'type': 'OSError'},
+            {'stage': 'callback-finished', 'type': 'ValueError', 'message': 'private'}]
+        folder = self.base/'cleanup-refusal'
+        with mock.patch.object(runner, 'launch', side_effect=error) as launched:
+            report = run(self.path, folder)
+        self.assertEqual(1, launched.call_count)
+        self.assertEqual(0, report['completedProcesses'])
+        receipt = json.loads((folder/'runs/0000/execution.json').read_text())
+        self.assertEqual('RuntimeError', receipt['error'])
+        self.assertEqual([{'stage': 'callback-poll', 'type': 'OSError'},
+                          {'stage': 'cleanup-job', 'type': 'RuntimeError'}], receipt['failureDetails'])
+        self.assertNotIn('private', (folder/'runs/0000/execution.json').read_text())
+
+    def test_preparation_refusal_preserves_both_safe_callback_failures(self):
+        self.config['workloads'][0]['prepare'] = [[sys.executable, '{project}/adapter.py', '{request}']]
+        self.save()
+        error = OSError('private exception text')
+        error.unity_bench_failures = [{'stage': 'callback-poll', 'type': 'OSError'},
+                                    {'stage': 'callback-finished', 'type': 'ValueError'}]
+        folder = self.base/'preparation-callback-refusal'
+        with mock.patch.object(runner, 'launch', side_effect=error) as launched:
+            report = run(self.path, folder)
+        self.assertEqual(1, launched.call_count)
+        self.assertEqual(0, report['completedProcesses'])
+        receipt = json.loads((folder/'runs/0000/execution.json').read_text())
+        self.assertEqual('preparation', receipt['stage'])
+        self.assertEqual(error.unity_bench_failures, receipt['failureDetails'])
+        self.assertNotIn('private', (folder/'runs/0000/execution.json').read_text())
+
     def test_changed_plan_cannot_relabel_evidence(self):
         folder = self.base / 'changed'; run(self.path, folder)
         path = folder / 'plan.json'; value = json.loads(path.read_text()); value['config']['name'] = 'changed'; path.write_text(json.dumps(value))

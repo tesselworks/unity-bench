@@ -165,11 +165,14 @@ class WindowsProbe:
             return None
         return self.ticks(values[2]) + self.ticks(values[3])
 
-    def started(self, handle):
+    def started(self, handle, receipt=None):
         values = [self.w.FILETIME() for _ in range(4)]
-        if not self.api.GetProcessTimes(handle, *[ctypes.byref(v) for v in values]):
-            return None
-        return self.ticks(values[0]) - 11644473600
+        success = bool(self.api.GetProcessTimes(handle, *[ctypes.byref(v) for v in values]))
+        error_code = 0 if success else self.last_error()
+        started = self.ticks(values[0]) - 11644473600 if success else None
+        if receipt is not None:
+            receipt.update(api='GetProcessTimes', success=success, errorCode=error_code, startedUnix=started)
+        return started
 
     @staticmethod
     def last_error():
@@ -415,23 +418,44 @@ class WindowsProbe:
         # Owned objects are opened first, once, with query+synchronize rights.
         for descriptor in sorted(frozen, key=lambda row: row['pid'] not in owned):
             pid = descriptor['pid']; row = dict(descriptor); stage = 'open-process'
+            native_queries = []
             try:
                 controlled = self.owned_root_pid is not None and pid in owned
                 wanted_access = 0x101000 if controlled else 0x1000
+                had_handle = pid in self.handles
+                existing_access = self.handle_access.get(pid)
+                had_anchor = pid in self.owned_sync_identities
                 if pid not in self.handles:
                     handle = self.api.OpenProcess(wanted_access, False, pid)
+                    open_error = 0 if handle else self.last_error()
+                    if controlled:
+                        native_queries.append({'api': 'OpenProcess', 'requestedAccess': wanted_access,
+                            'success': bool(handle), 'errorCode': open_error, 'hadExistingHandle': had_handle,
+                            'existingAccess': existing_access, 'hadAnchor': had_anchor})
                     if handle: self.handles[pid] = handle; self.handle_access[pid] = wanted_access
                 handle = self.handles.get(pid)
                 existing_anchor = self.owned_sync_identities.get(pid)
+                if controlled and had_handle:
+                    native_queries.append({'api': 'RetainedHandle', 'requestedAccess': wanted_access,
+                        'available': bool(handle), 'hadExistingHandle': True, 'existingAccess': existing_access,
+                        'hadAnchor': had_anchor})
                 if controlled and (not handle or self.handle_access.get(pid) != wanted_access
                                    or (pid in self.owned_sync_handles and self.owned_sync_handles[pid] != handle)):
                     raise OSError('Owned initial query/synchronize handle unavailable or mismatched')
                 if handle:
                     if controlled:
                         stage = 'query-owned-pid'
-                        if int(self.api.GetProcessId(handle)) != pid: raise OSError('Owned initial handle PID differs')
+                        actual_pid = int(self.api.GetProcessId(handle))
+                        pid_error = 0 if actual_pid else self.last_error()
+                        native_queries.append({'api': 'GetProcessId', 'actualPid': actual_pid,
+                            'success': actual_pid != 0, 'errorCode': pid_error})
+                        if actual_pid != pid: raise OSError('Owned initial handle PID differs')
                     stage = 'query-exit-code'; active = self.w.DWORD()
                     queried_active = self.api.GetExitCodeProcess(handle, ctypes.byref(active))
+                    exit_error = 0 if queried_active else self.last_error()
+                    if controlled:
+                        native_queries.append({'api': 'GetExitCodeProcess', 'success': bool(queried_active),
+                            'errorCode': exit_error, 'exitCode': int(active.value) if queried_active else None})
                     if controlled and not queried_active: raise OSError('Owned initial exit-code query failed')
                     if not controlled and (not queried_active or active.value != 259):
                         candidate = self.api.OpenProcess(0x1000, False, pid); live = self.w.DWORD()
@@ -451,7 +475,11 @@ class WindowsProbe:
                     if existing_anchor and 'imageProof' in existing_anchor:
                         row['imageProof'] = existing_anchor['imageProof']
                 else: row['executable'] = None
-                stage = 'query-creation'; row['startedUnix'] = self.started(handle) if handle else None
+                stage = 'query-creation'
+                creation_query = {}
+                row['startedUnix'] = self.started(handle, creation_query if controlled else None) if handle else None
+                if controlled and creation_query:
+                    native_queries.append(creation_query)
                 if controlled:
                     if row['startedUnix'] is None: raise OSError('Owned initial creation query failed')
                     previous = self.owned_sync_identities.get(pid) or self.known.get(pid)
@@ -465,7 +493,8 @@ class WindowsProbe:
                     'censusStartMonotonic': census_start_monotonic, 'failedUtc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     'failedMonotonic': time.monotonic(), 'pid': pid, 'stage': stage, 'errorType': type(error).__name__,
                     'error': str(error), 'descriptor': descriptor, 'known': self.known.get(pid), 'partialIdentity': row,
-                    'ownedRootPid': self.owned_root_pid, 'imageQuery': self.image_queries.get(pid)})
+                    'ownedRootPid': self.owned_root_pid, 'imageQuery': self.image_queries.get(pid),
+                    'nativeQueries': native_queries})
                 raise
         values = [self.w.FILETIME() for _ in range(3)]
         if not self.api.GetSystemTimes(*[ctypes.byref(v) for v in values]):

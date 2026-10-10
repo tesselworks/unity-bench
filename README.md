@@ -20,6 +20,8 @@ A campaign identifies exact variants: revision, Unity version and backend. Each 
 
 The report uses each process's samples to form a process-level summary, then shows repeated observations and their spread. A result with missing evidence or different input, output, settings or work counters is retained for diagnosis. Windows campaigns can opt into an independent CPU/PID observer with a bounded prepare/start/finish/release protocol. Only complete, replayable eligible evidence permits exploratory ratios. Campaigns without that observer retain descriptive distributions and no adopted speed ratios. Successful process execution alone is not a performance verdict.
 
+Windows launch failures retain ordered, allowlisted error types and stages separately from cleanup failures. Native owned-process probe failures also retain the requested access, existing identity-anchor state and immediate Windows API error codes. These receipts explain a refusal; they do not replace missing process identity evidence or make a refused process eligible. Exception messages and command lines are excluded from launch failure details.
+
 There is no universal Unity workload. The framework cannot infer equivalent gameplay from two matching scene names, force older Unity versions to compile newer project source, or turn a few repetitions into statistical significance. The exact preparation and measurement boundaries are part of the experiment.
 
 ## Development scope
