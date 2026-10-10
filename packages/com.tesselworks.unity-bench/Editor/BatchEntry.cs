@@ -47,6 +47,7 @@ namespace UnityBench.Editor
         private sealed class Sample
         {
             public int Iteration;
+            public string Metric = "executeWallTime";
             public double Milliseconds;
         }
 
@@ -101,12 +102,13 @@ namespace UnityBench.Editor
                         if (request.preparationOnly)
                         {
                             startedUtc = UtcNow();
+                            if (workload is IPreparedIterationWorkload prepared) prepared.PrepareIteration(0);
                             workload.Execute();
                             proof = workload.CaptureProof();
                             ValidateProof(proof);
                             completedUtc = UtcNow();
                             // A full-work compatibility/cache prime, with no operation stopwatch.
-                            WriteResult(request, "prepared", proof, samples, startedUtc, completedUtc);
+                            WriteResult(request, "prepared", proof, samples, startedUtc, completedUtc, workload as IWorkloadMetrics, workload as IWorkloadValidity);
                             Exit(0);
                             return;
                         }
@@ -150,12 +152,23 @@ namespace UnityBench.Editor
                 startedUtc = UtcNow();
                 for (var iteration = 0; iteration <= request.warmIterations; iteration++)
                 {
+                    if (workload is IPreparedIterationWorkload prepared) prepared.PrepareIteration(iteration);
                     var watch = Stopwatch.StartNew();
                     workload.Execute();
                     watch.Stop();
                     var elapsed = watch.Elapsed.TotalMilliseconds;
                     if (!Finite(elapsed) || elapsed < 0)
                         throw new InvalidOperationException("Invalid measured time.");
+                    var additional = workload is IWorkloadMetrics measured ? measured.CaptureMetrics() : null;
+                    var aggregateMetric = workload is IWorkloadMetrics scoped ? scoped.AggregateMetric : "executeWallTime";
+                    if (string.IsNullOrWhiteSpace(aggregateMetric)) throw new InvalidOperationException("Invalid aggregate metric.");
+                    if (additional != null)
+                        foreach (var metric in additional)
+                        {
+                            if (string.IsNullOrWhiteSpace(metric.Key) || metric.Key == aggregateMetric || !Finite(metric.Value) || metric.Value < 0)
+                                throw new InvalidOperationException("Invalid consumer metric.");
+                            samples.Add(new Sample { Iteration = iteration, Metric = metric.Key, Milliseconds = metric.Value });
+                        }
                     var next = workload.CaptureProof();
                     ValidateProof(next);
                     if (proof != null && !Equal(proof, next))
@@ -163,10 +176,10 @@ namespace UnityBench.Editor
                     proof = new WorkProof { InputFingerprint = next.InputFingerprint,
                         OutputFingerprint = next.OutputFingerprint,
                         WorkCounters = new Dictionary<string, double>(next.WorkCounters) };
-                    samples.Add(new Sample { Iteration = iteration, Milliseconds = elapsed });
+                    samples.Add(new Sample { Iteration = iteration, Metric = aggregateMetric, Milliseconds = elapsed });
                 }
                 completedUtc = UtcNow();
-                WriteResult(request, "completed", proof, samples, startedUtc, completedUtc);
+                WriteResult(request, "completed", proof, samples, startedUtc, completedUtc, workload as IWorkloadMetrics, workload as IWorkloadValidity);
                 WriteSignal(request.finishedPath, request, completedUtc);
             }
 
@@ -357,7 +370,7 @@ namespace UnityBench.Editor
         }
 
         private static void WriteResult(Request request, string status, WorkProof proof, List<Sample> samples,
-            string startedUtc, string completedUtc)
+            string startedUtc, string completedUtc, IWorkloadMetrics metrics = null, IWorkloadValidity validity = null)
         {
             var json = new StringBuilder("{\"schemaVersion\":1,\"runId\":").Append(Quote(request.runId))
                 .Append(",\"variant\":").Append(Quote(request.variant)).Append(",\"workload\":").Append(Quote(request.workload))
@@ -390,10 +403,25 @@ namespace UnityBench.Editor
                 if (i > 0) json.Append(',');
                 json.Append("{\"iteration\":").Append(samples[i].Iteration).Append(",\"phase\":")
                     .Append(Quote(samples[i].Iteration == 0 ? "first" : "warm"))
-                    .Append(",\"metric\":\"executeWallTime\",\"value\":")
+                    .Append(",\"metric\":").Append(Quote(samples[i].Metric)).Append(",\"value\":")
                     .Append(samples[i].Milliseconds.ToString("R", CultureInfo.InvariantCulture)).Append(",\"unit\":\"ms\"}");
             }
-            json.Append("]}\n");
+            json.Append(']');
+            if (validity != null)
+                json.Append(",\"workloadValidity\":{\"valid\":").Append(validity.IsValid ? "true" : "false").Append('}');
+            if (metrics != null)
+            {
+                json.Append(",\"metricScopes\":{");
+                var first = true;
+                foreach (var scope in metrics.MetricScopes)
+                {
+                    if (!first) json.Append(',');
+                    first = false;
+                    json.Append(Quote(scope.Key)).Append(':').Append(Quote(scope.Value));
+                }
+                json.Append('}');
+            }
+            json.Append("}\n");
             WriteNew(request.outputPath, json.ToString());
         }
 

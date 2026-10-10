@@ -73,6 +73,8 @@ def _run(config_path, destination):
         request = {'schemaVersion': 1, 'runId': str(uuid.uuid4()), 'variant': row['variant'], 'workload': row['workload'],
                    'outputPath': str(directory / 'result.json'), 'warmIterations': workload.get('warmIterations', 3),
                    'clockMode': workload['mode'], 'sourceRevision': variant['revision'], 'planDigest': frozen['planDigest']}
+        if 'measuredWorkerRoles' in workload:
+            request['measuredWorkerRoles'] = list(workload['measuredWorkerRoles'])
         if controlled:
             request.update({key+'Path': str(directory/(key+'.json')) for key in ('ready', 'start', 'finished', 'release')})
             request['handshakeTimeoutSeconds'] = 120

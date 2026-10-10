@@ -27,7 +27,7 @@ The revision identifies requested source; actual inputs and generated content st
 |---|---|
 | `schemaVersion` | Configuration schema, currently `1` |
 | `name`, `repository` | Campaign name and project repository |
-| `variants` | Exact `id`, 40-character `revision`, `unityVersion`, `backend`, optional absolute `unityExecutable` |
+| `variants` | Exact `id`, 40-character `revision`, `unityVersion`, `backend`, optional absolute `unityExecutable`; controlled execution defaults to `editor-batch`, while explicit `player` requires its own absolute `primaryExecutable` |
 | `axes` | Named comparisons referencing `left` and `right` variant IDs |
 | `workloads` | Project workload ID, repository-relative `projectPath`, `mode`, argument-array `command`, optional argument-array lists `prepare`, timeout and warm iteration count |
 | `repetitions` | Predetermined fresh-process comparison repetitions |
@@ -37,6 +37,30 @@ The revision identifies requested source; actual inputs and generated content st
 `mode: "samples"` uses the adapter's in-process measurements. `mode: "external"` reports whole adapter invocation wall time, including process launch, startup, output and shutdown. The report labels this `whole-process-wall/process`; it is not an import-only or startup-ready metric. An external adapter may return an empty sample array but must still provide completion, actual environment and parity proof. Both modes still require a complete adapter result. A future lifecycle adapter must provide a real workload and a defined completion condition. See [methodology](methodology.md).
 
 The runner expands only documented argv placeholders and starts subprocesses without a shell. Adapters may perform project-specific preparation, but they must not install software, alter machine-wide settings or terminate unrelated sessions implicitly.
+
+Controlled Player evidence identifies the actual executable, native PID, runtime
+detection basis and build source/backend/binary digest. It uses Player preparation
+and asset readiness rather than claiming Editor compilation flags. Build and
+content policies remain in the consumer. A requested backend that cannot produce
+the corresponding actual Player is a refusal.
+
+An optional `measuredWorkerRoles` list declares intentional compiler/import work
+before execution. The role vocabulary is bounded; ownership alone never admits
+an arbitrary worker. Each admitted worker requires native executable identity
+inside the selected Editor installation, ancestry rooted in the actual Editor
+and birth within a declared operation interval. Intervals crossing an operation
+boundary and all unmeasured preparation/reset/exit intervals retain background
+classification and the existing guard. Original CPU totals and role attribution
+are retained for replay; foreign work, unknown identity, PID reuse and census gaps
+keep their existing refusal rules.
+
+The synchronous package optionally exposes per-iteration preparation outside its
+operation stopwatch and additional workload-defined metric clocks. Each metric
+must cover every first/warm round. A broader suite clock including preparation
+has a distinct metric name; it must not be presented as the cost of individual
+operations. Unmeasured full-work primes emit no timing samples. Async import,
+reload and Play use separate consumer lifecycle adapters with clocks that survive
+their actual completion events.
 
 The POSIX launcher creates an owned session, bounds waiting, and cleans up inherited-session children after timeout or wrapper completion. Adapters must not create detached services/new sessions; escaped descendants are outside this protocol. Windows launches a suspended process with atomic Job Object assignment and a restricted inherited handle list, verifies ownership, then resumes it. Both normal completion and failure clean up the entire owned job; unrelated processes are never termination targets.
 

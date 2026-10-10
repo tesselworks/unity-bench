@@ -7,13 +7,46 @@ import os
 from pathlib import Path
 import platform
 import time
-from .config import read_json, require
+from .config import read_json, require, primary_executable, execution_kind, MEASURED_WORKER_ROLES
 from .evidence import ancestry, canonical, descendants, sha, write
 from .windows_host import WindowsProbe, validate_image_proof
 
 BLOCKERS = {'unity', 'unityshadercompiler', 'assetimportworker', 'bee_backend', 'dotnet', 'msbuild',
             'vbcscompiler', 'clang', 'clang++', 'clang-cl', 'lld-link', 'il2cpp', 'cl', 'runner.worker'}
 BACKGROUND = BLOCKERS - {'unity', 'runner.worker'}
+WORKER_ROLE_NAMES = {'asset-import-worker': {'assetimportworker'},
+                     'script-compiler': {'dotnet', 'msbuild', 'vbcscompiler', 'bee_backend'}}
+
+
+def measured_worker_role(row, known, primary_pid, editor, region):
+    if not region or primary_pid is None or row['pid'] == primary_pid:
+        return None
+    roles = region['roles']
+    require(isinstance(roles, list) and roles and len(set(roles)) == len(roles) and set(roles) <= MEASURED_WORKER_ROLES, 'Invalid measured worker roles')
+    name = row['name'].lower().removesuffix('.exe')
+    selected = [role for role in roles if name in WORKER_ROLE_NAMES[role]]
+    if not selected or row['pid'] not in descendants(known, {primary_pid}):
+        return None
+    executable = row.get('executable')
+    root = ntpath.dirname(editor or '')
+    require(root and executable and ntpath.isabs(executable), 'Measured worker native path unavailable')
+    if ntpath.normcase(ntpath.commonpath([root, executable])) != ntpath.normcase(root):
+        return None
+    require(ntpath.basename(executable).lower().removesuffix('.exe') == name, 'Measured worker executable/name differs')
+    birth = row.get('startedUnix')
+    if not finite(birth) or not utc(region['startedUtc']) <= birth <= utc(region['completedUtc']):
+        return None
+    if 'imageProof' in row:
+        validate_image_proof(row['imageProof'], row['pid'], executable)
+    return selected[0]
+
+
+def validate_readiness(ready, variant):
+    if execution_kind(variant) == 'player':
+        require(ready.get('executionKind') == 'player' and ready.get('prepared') is True
+                and ready.get('assetLoadComplete') is True, 'Player readiness proof is invalid')
+    else:
+        require(ready.get('isCompiling') is False and ready.get('isUpdating') is False, 'Editor readiness flags are invalid')
 
 
 def utc(value):
@@ -53,7 +86,7 @@ def census_bounds(snapshot):
     return begin
 
 
-def interval(previous, current, controller_pid, wrapper_pid=None, primary_pid=None, editor=None, cli=None, classification_primary_pid=None):
+def interval(previous, current, controller_pid, wrapper_pid=None, primary_pid=None, editor=None, cli=None, classification_primary_pid=None, measured_region=None):
     """Every observed interval is retained, including unknown/refused evidence."""
     classification = primary_pid if classification_primary_pid is None else classification_primary_pid
     basis = 'final-ready-native-identity-replay' if classification_primary_pid is not None else 'observed-primary-only' if primary_pid is not None else 'provisional-unassigned-primary'
@@ -117,6 +150,13 @@ def interval(previous, current, controller_pid, wrapper_pid=None, primary_pid=No
                 base['blockers'].append({'pid': row['pid'], 'name': row['name'], 'role': 'nonowned-or-unknown-build-editor-worker'})
         require(not base['blockers'], 'Competing Editor/compiler/worker')
         work_cpu = background_cpu = control_cpu = 0.0
+        measured_cpu = 0.0; measured_attribution = []
+        active_region = None
+        if measured_region:
+            for region in measured_region['intervals']:
+                if utc(previous['utc']) >= utc(region['startedUtc']) and utc(current['utc']) <= utc(region['completedUtc']):
+                    require(active_region is None, 'Overlapping measured worker intervals')
+                    active_region = dict(region, roles=measured_region['roles'])
         uncertain_birth_cpu = 0.0; census_baselines = []
         for pid in owned | control:
             after = current_counters.get(pid)
@@ -146,7 +186,11 @@ def interval(previous, current, controller_pid, wrapper_pid=None, primary_pid=No
             require(row.get('executable') and finite(row.get('startedUnix')), 'Owned process identity unavailable')
             if pid in control and pid not in owned: control_cpu += delta; continue
             name = row['name'].lower().removesuffix('.exe')
-            if name in BACKGROUND or (name == 'unity' and path_equal(row['executable'], editor) and classification is not None and pid != classification):
+            role = measured_worker_role(row, known, classification, editor, active_region)
+            if role:
+                work_cpu += delta; measured_cpu += delta
+                measured_attribution.append({'pid': pid, 'role': role, 'executable': row['executable'], 'startedUnix': row['startedUnix'], 'cpuSeconds': delta})
+            elif name in BACKGROUND or (name == 'unity' and path_equal(row['executable'], editor) and classification is not None and pid != classification):
                 background_cpu += delta
             else: work_cpu += delta
         busy = current['systemBusySeconds'] - previous['systemBusySeconds']
@@ -161,6 +205,10 @@ def interval(previous, current, controller_pid, wrapper_pid=None, primary_pid=No
                     foreignCpuPercent=foreign_upper*scale, foreignCpuLowerBoundPercent=foreign_lower*scale,
                     foreignCpuBasis='conservative-upper-bound-with-census-birth-uncertainty' if census_baselines else 'system-minus-observed-owned-and-controller',
                     newProcessCensusBaselines=census_baselines)
+        if measured_region:
+            base.update(measuredWorkerCpuPercent=measured_cpu*scale, measuredWorkerAttribution=measured_attribution,
+                        originalOwnedBackgroundCpuPercent=(background_cpu+measured_cpu)*scale,
+                        measuredWorkerPolicy=measured_region)
     except (ValueError, KeyError, TypeError, OverflowError) as error:
         base['reason'] = type(error).__name__
     return base
@@ -346,9 +394,22 @@ def derive(snapshots, boundaries, request, variant, policy, controller_pid, wrap
     for value in (ready, start, finished, release):
         require(isinstance(value, dict) and value.get('runId') == request['runId']
                 and value.get('processId') == primary_pid and value.get('requestSha256') == request_sha, 'Wrong lifecycle identity')
-    require(ready.get('isCompiling') is False and ready.get('isUpdating') is False, 'Editor readiness is not settled-capable')
+    validate_readiness(ready, variant)
     times = [utc(value['utc']) for value in (ready, start, finished, release)]
     require(times == sorted(times) and len(set(times)) == 4, 'Lifecycle order is invalid')
+    measured_region = None
+    if request.get('measuredWorkerRoles'):
+        require(execution_kind(variant) == 'editor-batch', 'Measured worker roles require actual Editor work')
+        measured_region = boundaries.get('measuredWorkerRegion')
+        require(isinstance(measured_region, dict) and measured_region.get('roles') == request['measuredWorkerRoles'], 'Measured worker policy provenance differs')
+        require(times[1] <= utc(measured_region['startedUtc']) <= utc(measured_region['completedUtc']) <= times[2], 'Measured worker region lies outside measurement')
+        regions = measured_region.get('intervals')
+        require(isinstance(regions, list) and len(regions) == request['warmIterations'] + 1, 'Missing measured iteration intervals')
+        previous_end = utc(measured_region['startedUtc'])
+        for i, region in enumerate(regions):
+            require(isinstance(region, dict) and type(region.get('iteration')) is int and region['iteration'] == i
+                    and previous_end <= utc(region['startedUtc']) < utc(region['completedUtc']) <= utc(measured_region['completedUtc']), 'Measured iteration intervals overlap or escape work region')
+            previous_end = utc(region['completedUtc'])
     require(utc(snapshots[0]['utc']) <= utc(launch_observed) <= times[0]
             <= utc(ready_observed) <= utc(settled_start) <= times[1] <= times[2]
             <= utc(finished_observed) <= times[3] <= utc(job_returned) <= utc(after_exit)
@@ -374,10 +435,10 @@ def derive(snapshots, boundaries, request, variant, policy, controller_pid, wrap
     require(exit_index > 0 and utc(snapshots[exit_index-1]['utc']) <= utc(job_returned)
             <= utc(exit_snapshot['censusStartUtc']), 'Job return lies inside an earlier census')
     census_bounds(exit_snapshot)
-    exit_proofs = prove_owned_exit(exit_snapshot, identities, primary_pid, variant['editorExecutable'])
+    exit_proofs = prove_owned_exit(exit_snapshot, identities, primary_pid, primary_executable(variant))
     require(all(proof['exit']['exitedUnix'] <= utc(job_returned) for proof in exit_proofs.values()), 'Native exit follows claimed owned join completion')
     for snapshot in snapshots[exit_index:]:
-        require(prove_owned_exit(snapshot, identities, primary_pid, variant['editorExecutable']) == exit_proofs,
+        require(prove_owned_exit(snapshot, identities, primary_pid, primary_executable(variant)) == exit_proofs,
                 'Owned native exit identity or final CPU changed after exit observation')
     initial = process_table(snapshots[0]['known'])
     require(controller_pid in initial, 'Controller not observed before launch')
@@ -385,7 +446,7 @@ def derive(snapshots, boundaries, request, variant, policy, controller_pid, wrap
     require(isinstance(machine_fingerprint, str) and len(machine_fingerprint) == 64
             and all(c in '0123456789abcdef' for c in machine_fingerprint), 'Host identity unavailable')
     previous_time = None
-    primary_identity = validated_primary_identity(snapshots, ready_observed, ready, wrapper_pid, primary_pid, variant['editorExecutable'])
+    primary_identity = validated_primary_identity(snapshots, ready_observed, ready, wrapper_pid, primary_pid, primary_executable(variant))
     for index, snap in enumerate(snapshots):
         timestamp = utc(snap['utc'])
         if previous_time is not None: require(timestamp > previous_time, 'Noncontiguous host timeline')
@@ -450,7 +511,7 @@ def derive(snapshots, boundaries, request, variant, policy, controller_pid, wrap
             identity = known[primary_pid]
             if primary_pid in live:
                 require(all(live[primary_pid].get(key) == identity.get(key) for key in ('pid', 'parentPid', 'name', 'executable', 'startedUnix')), 'Live primary identity differs from retained handle')
-            require(path_equal(identity.get('executable'), variant['editorExecutable'])
+            require(path_equal(identity.get('executable'), primary_executable(variant))
                     and finite(identity.get('startedUnix'))
                     and utc(snapshots[0]['utc']) <= identity['startedUnix'] <= times[0], 'Actual primary executable/start identity differs')
             if primary_identity is None: primary_identity = identity
@@ -494,7 +555,8 @@ def derive(snapshots, boundaries, request, variant, policy, controller_pid, wrap
             prior_primary = prior['observer']['primaryPid']
             current_wrapper = meta['wrapperPid']
             row = interval(prior, snap, controller_pid, current_wrapper, prior_primary,
-                           variant['editorExecutable'], variant.get('unityExecutable'), classification_primary_pid=primary_pid)
+                           primary_executable(variant), variant.get('unityExecutable'), classification_primary_pid=primary_pid,
+                           measured_region=measured_region)
             records.append(row)
             if row['status'] != 'eligible': errors.append('unknown-or-competing-host-interval'); continue
             begin, end = utc(row['startUtc']), utc(row['utc'])
@@ -557,6 +619,8 @@ def validate_host(directory, request, variant, policy, execution):
         require(read_json(directory/(key+'.json')) == summary['boundaries'][key], 'Retained lifecycle signal differs')
     require(ntpath.basename(request['outputPath']) == 'result.json', 'Unexpected retained result filename')
     result = read_json(directory/'result.json')
+    if request.get('measuredWorkerRoles'):
+        require(summary['boundaries'].get('measuredWorkerRegion') == {'roles': request['measuredWorkerRoles'], 'startedUtc': result['startedUtc'], 'completedUtc': result['completedUtc'], 'intervals': result.get('measuredWorkerIntervals')}, 'Actual measured worker boundaries differ')
     require(result.get('processId') == summary['primaryProcessId'] and result.get('requestSha256') == summary['requestSha256']
             and result.get('completedUtc') == summary['boundaries']['finished'].get('completedUtc'), 'Result lifecycle proof differs')
     require(utc(summary['boundaries']['start']['utc']) <= utc(result['startedUtc'])
@@ -587,6 +651,7 @@ class HostSession:
         self.errors = []; self.after_exit = None; self.job_returned = None; self.job_api_returned = None; self.owned_join = None; self.next_sample = 0
         self.settled_start = None; self.preparation_deadline = None
         self.finished_held_begin = self.finished_held_end = None
+        self.measured_worker_region = None
 
     def sample(self, force=False):
         if not force and time.monotonic() < self.next_sample: return
@@ -597,7 +662,7 @@ class HostSession:
         self.snapshots.append(current)
         if self.previous is not None:
             self.records.append(interval(self.previous, current, self.controller, self.wrapper,
-                                         self.previous['observer']['primaryPid'], self.variant['editorExecutable'],
+                                         self.previous['observer']['primaryPid'], primary_executable(self.variant),
                                          self.variant.get('unityExecutable')))
         self.previous = current; self.next_sample = time.monotonic() + .5
 
@@ -630,8 +695,8 @@ class HostSession:
             ready = self.read_signal('readyPath')
             if ready is not None:
                 pid = ready['processId']; known = self.previous['known']; table = process_table(known)
-                validated_primary_identity(self.snapshots, self.previous['utc'], ready, self.wrapper, pid, self.variant['editorExecutable'])
-                require(ready.get('isCompiling') is False and ready.get('isUpdating') is False, 'Editor readiness flags are invalid')
+                validated_primary_identity(self.snapshots, self.previous['utc'], ready, self.wrapper, pid, primary_executable(self.variant))
+                validate_readiness(ready, self.variant)
                 self.primary = pid; self.ready = ready; self.ready_observed = self.previous['utc']
                 remaining = 120 - (datetime.datetime.now(datetime.timezone.utc).timestamp() - utc(ready['utc']))
                 require(remaining > 0, 'Preparation readiness is stale')
@@ -641,7 +706,7 @@ class HostSession:
             if time.monotonic() >= self.preparation_deadline:
                 raise TimeoutError('Editor preparation exceeded bounded wait')
             historical = [interval(previous, current, self.controller, current['observer']['wrapperPid'],
-                                   previous['observer']['primaryPid'], self.variant['editorExecutable'],
+                                   previous['observer']['primaryPid'], primary_executable(self.variant),
                                    self.variant.get('unityExecutable'), classification_primary_pid=self.primary)
                           for previous, current in zip(self.snapshots, self.snapshots[1:])]
             # Unknown ownership/census, competing work and clock gaps are hard for
@@ -660,6 +725,9 @@ class HostSession:
                 require(result.get('processId') == self.primary and result.get('status') == 'completed'
                         and result.get('requestSha256') == self.request_sha
                         and result.get('completedUtc') == finished.get('completedUtc'), 'Finished before matching complete result')
+                if self.request.get('measuredWorkerRoles'):
+                    require(utc(self.start['utc']) <= utc(result['startedUtc']) <= utc(result['completedUtc']) <= utc(finished['utc']), 'Measured worker actual boundaries invalid')
+                    self.measured_worker_region = {'roles': self.request['measuredWorkerRoles'], 'startedUtc': result['startedUtc'], 'completedUtc': result['completedUtc'], 'intervals': result.get('measuredWorkerIntervals')}
                 self.finished = finished; self.finished_observed = self.previous['utc']
         if self.finished is not None and self.release is None:
             held = [r for r in self.records if utc(r['startUtc']) >= utc(self.finished_observed)]
@@ -700,7 +768,7 @@ class HostSession:
         require(utc(self.previous.get('censusStartUtc')) >= utc(self.job_returned), 'Exit census started before owned cleanup completed')
         census_bounds(self.previous)
         identities = retained_owned(self.snapshots, self.wrapper)
-        prove_owned_exit(self.previous, identities, self.primary, self.variant['editorExecutable'])
+        prove_owned_exit(self.previous, identities, self.primary, primary_executable(self.variant))
         self.after_exit = self.previous['utc']
         time.sleep(.5); self.sample(True)
 
@@ -712,6 +780,8 @@ class HostSession:
                           'finishedObservedUtc': self.finished_observed, 'launchObservedUtc': self.launch_observed,
                           'requestSha256': self.request_sha, 'settledBeforeStartUtc': self.settled_start,
                           'finishedHeldBeginUtc': self.finished_held_begin, 'finishedHeldEndUtc': self.finished_held_end}
+            if self.request.get('measuredWorkerRoles'):
+                boundaries['measuredWorkerRegion'] = self.measured_worker_region
             try:
                 summary = derive(self.snapshots, boundaries, self.request, self.variant, self.policy,
                                  self.controller, self.wrapper, self.primary)

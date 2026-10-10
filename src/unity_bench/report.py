@@ -4,7 +4,7 @@ import hashlib
 import math
 from pathlib import Path
 import statistics
-from .config import digest, read_json, require, schedule, validate
+from .config import digest, read_json, require, schedule, validate, execution_kind, primary_executable
 from .host import validate_host, utc
 
 
@@ -24,18 +24,55 @@ def validate_result(result, request, variant):
         require(environment.get(key) == variant[key], 'Actual environment differs: ' + key)
     if request.get('readyPath'):
         settings = environment.get('settings', {})
-        require(environment.get('executionKind') == 'editor-batch' and settings.get('batchMode') is True,
-                'Controlled lifecycle requires actual batch Editor')
+        kind = execution_kind(variant)
+        require(environment.get('executionKind') == kind, 'Controlled lifecycle execution kind differs')
+        if kind == 'editor-batch':
+            require(settings.get('batchMode') is True, 'Controlled lifecycle requires actual batch Editor')
+        else:
+            from .host import path_equal
+            require(environment.get('isEditor') is False and settings.get('debugBuild') is False, 'Controlled player must prove actual nondevelopment Player')
+            require(all(isinstance(environment.get(key), str) and environment[key].strip()
+                        for key in ('runtimeDetectionBasis', 'coreLibrary', 'runtimeDescription')),
+                    'Actual Player runtime detection unavailable')
+            library = environment['coreLibrary'].split(',')[0].strip()
+            require(variant['backend'] != 'coreclr' or library == 'System.Private.CoreLib',
+                    'Actual Player core library contradicts CoreCLR')
+            require(variant['backend'] != 'mono' or library == 'mscorlib',
+                    'Actual Player core library contradicts Mono')
+            require(path_equal(environment.get('primaryExecutable'), primary_executable(variant)), 'Actual Player executable differs')
+            build = environment.get('buildIdentity') or {}
+            require(build.get('sourceRevision') == request['sourceRevision'] and build.get('unityVersion') == variant['unityVersion']
+                    and build.get('backend') == variant['backend'] and build.get('developmentBuild') is False, 'Actual Player build identity differs')
+            require(isinstance(build.get('binarySha256'), str) and len(build['binarySha256']) == 64
+                    and all(c in '0123456789abcdef' for c in build['binarySha256']), 'Actual Player binary digest unavailable')
         require(settings.get('jobWorkerCountAvailable') is True and type(settings.get('jobWorkerCount')) is int and settings['jobWorkerCount'] > 0,
                 'Actual job worker count unavailable')
-        require(settings.get('codeOptimizationAvailable') is True and settings.get('codeOptimization') in ('Debug', 'Release'),
-                'Actual code optimization unavailable')
+        if kind == 'editor-batch':
+            require(settings.get('codeOptimizationAvailable') is True and settings.get('codeOptimization') in ('Debug', 'Release'),
+                    'Actual code optimization unavailable')
     for key in ('inputFingerprint', 'outputFingerprint'):
         require(isinstance(result.get(key), str) and len(result[key]) == 64 and all(c in '0123456789abcdef' for c in result[key]), 'Invalid ' + key)
     counters = result.get('workCounters')
+    if 'workloadValidity' in result:
+        require(isinstance(result['workloadValidity'], dict) and type(result['workloadValidity'].get('valid')) is bool, 'Malformed consumer workload validity')
     require(isinstance(counters, dict) and counters, 'Work counters missing')
     for key, value in counters.items():
         require(isinstance(key, str) and key and type(value) in (int, float) and math.isfinite(value) and value >= 0, 'Invalid work counter')
+    if 'semanticParity' in result:
+        parity = result['semanticParity']
+        require(isinstance(parity, dict) and type(parity.get('stable')) is bool and isinstance(parity.get('iterations'), list), 'Malformed semantic parity proof')
+        proofs = parity['iterations']
+        require(all(isinstance(row, dict) for row in proofs) and len(proofs) == request['warmIterations'] + 1 and [row.get('iteration') for row in proofs] == list(range(len(proofs))), 'Semantic round coverage differs')
+        for row in proofs:
+            require(isinstance(row, dict) and isinstance(row.get('workCounters'), dict) and row['workCounters'], 'Missing semantic round counters')
+            for field in ('inputFingerprint', 'outputFingerprint'):
+                require(isinstance(row.get(field), str) and len(row[field]) == 64 and all(c in '0123456789abcdef' for c in row[field]), 'Malformed semantic round hash')
+            require(all(type(value) in (int, float) and math.isfinite(value) and value >= 0 for value in row['workCounters'].values()), 'Malformed semantic round counter')
+        stable = all(all(row[key] == proofs[0][key] for key in ('inputFingerprint', 'outputFingerprint', 'workCounters')) for row in proofs)
+        require(parity['stable'] is stable, 'Semantic parity declaration differs from actual proofs')
+        require(result['inputFingerprint'] == proofs[0]['inputFingerprint'] and result['workCounters'] == proofs[0]['workCounters'], 'Actual semantic representative differs')
+        ordered = digest(proofs)
+        require(parity.get('orderedProofsDigest') == ordered and result['outputFingerprint'] == (proofs[0]['outputFingerprint'] if stable else ordered), 'Semantic output fingerprint differs')
     samples = result.get('samples')
     require(isinstance(samples, list), 'Samples must be an array')
     if request.get('clockMode') == 'external' and not samples:
@@ -104,6 +141,7 @@ def summarize(folder):
                 request = read_json(directory / 'request.json')
                 require(isinstance(request, dict), 'Request must be an object')
                 require(request.get('variant') == row['variant'] and request.get('workload') == row['workload'], 'Request differs from frozen plan')
+                require(request.get('measuredWorkerRoles') == workload.get('measuredWorkerRoles'), 'Measured worker policy differs from frozen workload')
                 require(request.get('planDigest') == plan['planDigest'] and request.get('sourceRevision') == variant['revision'] and
                         request.get('clockMode') == workload['mode'] and type(request.get('warmIterations')) is int and
                         request['warmIterations'] == workload.get('warmIterations', 3), 'Request measurement contract was changed')
@@ -130,6 +168,10 @@ def summarize(folder):
             if any(result is None for _, _, result in selected):
                 reasons.append('incomplete-or-rejected-process')
             results = [result for _, _, result in selected if result is not None]
+            if any(result.get('semanticParity', {}).get('stable', True) is False for result in results):
+                reasons.append('unstable-semantic-round-proofs')
+            if any(result.get('workloadValidity', {}).get('valid', True) is False for result in results):
+                reasons.append('consumer-workload-invalid')
             if results:
                 for key in ('inputFingerprint', 'outputFingerprint', 'workCounters'):
                     if any(result[key] != results[0][key] for result in results):
@@ -150,6 +192,10 @@ def summarize(folder):
                 reasons.append('missing-or-unequal-host')
             calibrations = [(row, execution, result) for row, execution, result in evidence
                             if row['kind'] == 'calibration' and row['workload'] == workload['id'] and row['variant'] in (axis['left'], axis['right'])]
+            if any(result is not None and result.get('semanticParity', {}).get('stable', True) is False for _, _, result in calibrations):
+                reasons.append('unstable-calibration-semantic-round-proofs')
+            if any(result is not None and result.get('workloadValidity', {}).get('valid', True) is False for _, _, result in calibrations):
+                reasons.append('consumer-workload-invalid')
             if controlled:
                 if config.get('repetitions', 3) < 3: reasons.append('insufficient-comparison-processes')
                 if config.get('calibrationRepetitions', 3) < 3 or any(result is None or execution.get('validatedHost', {}).get('status') != 'eligible' for _, execution, result in calibrations):
@@ -224,4 +270,4 @@ def summarize(folder):
                          for row, execution, result in evidence if result is None],
             'limitations': ['Shared-host foreign CPU excursions are retained annotations, not evidence of an isolated machine.',
                             'No significance, pure runtime attribution or automatic upgrade recommendation.',
-                            'Initial import, reload and Play transition adapters are not implemented.']}
+                            'Consumer-specific import, reload, Play and Player completion/workload validity require separate raw receipts; framework protocol alone does not establish them.']}

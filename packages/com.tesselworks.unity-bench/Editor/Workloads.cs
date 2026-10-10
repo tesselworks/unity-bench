@@ -3,13 +3,35 @@ using System.Collections.Generic;
 
 namespace UnityBench.Editor
 {
-    // Preparation and proof computation are outside the measured Execute boundary.
+    // Prepare and proof computation are outside the framework Execute boundary.
+    // Optional consumer metrics may define narrower operation clocks within Execute.
     // Each Execute must perform the same frozen work, without progressively reducing it.
     public interface IWorkload
     {
         void Prepare();
         void Execute();
         WorkProof CaptureProof();
+    }
+
+    // Optional consumer preparation per iteration, before any Execute stopwatch.
+    // Prepare() remains the once-per-process setup boundary for all existing workloads.
+    public interface IPreparedIterationWorkload : IWorkload
+    {
+        void PrepareIteration(int iteration);
+    }
+
+    // Consumer clocks must finish before metrics and proof are captured.
+    public interface IWorkloadMetrics : IWorkload
+    {
+        string AggregateMetric { get; }
+        IReadOnlyDictionary<string, string> MetricScopes { get; }
+        IReadOnlyDictionary<string, double> CaptureMetrics();
+    }
+
+    // Complete diagnostic work remains observable, but cannot authorize a ratio.
+    public interface IWorkloadValidity : IWorkload
+    {
+        bool IsValid { get; }
     }
 
     public sealed class WorkProof

@@ -7,6 +7,7 @@ import re
 import string
 
 PLACEHOLDERS = {'checkout', 'project', 'unity', 'request', 'result', 'variant', 'workload', 'unityVersion', 'backend', 'revision'}
+MEASURED_WORKER_ROLES = {'asset-import-worker', 'script-compiler'}
 
 
 def require(condition, message):
@@ -45,6 +46,14 @@ def argv(value):
                 require(field in PLACEHOLDERS and not spec and not conversion, 'Unknown command placeholder')
 
 
+def execution_kind(variant):
+    return variant.get('executionKind', 'editor-batch')
+
+
+def primary_executable(variant):
+    return variant.get('primaryExecutable') if execution_kind(variant) == 'player' else variant.get('editorExecutable')
+
+
 def validate(value):
     require(isinstance(value, dict) and type(value.get('schemaVersion')) is int and value['schemaVersion'] == 1, 'Unsupported campaign schema')
     identifier(value.get('name'))
@@ -69,10 +78,13 @@ def validate(value):
         require(isinstance(variant.get('revision'), str) and re.fullmatch('[0-9a-f]{40}', variant['revision']), 'Exact 40-character commit required')
         for field in ('unityVersion', 'backend'):
             require(isinstance(variant.get(field), str) and variant[field], 'Variant requires ' + field)
+        require(execution_kind(variant) in ('editor-batch', 'player'), 'Unknown execution kind')
         if 'unityExecutable' in variant:
             require(absolute_identity(variant['unityExecutable']), 'Unity executable must be absolute')
         if host['mode'] == 'windows-shared-host':
-            require(absolute_identity(variant.get('editorExecutable')), 'Host control requires exact installed Editor executable')
+            require(absolute_identity(primary_executable(variant)), 'Host control requires exact primary executable')
+            if execution_kind(variant) == 'player':
+                require(variant.get('backend') in ('mono', 'coreclr', 'il2cpp'), 'Unknown player scripting backend')
     axes = set()
     for axis in value['axes']:
         require(isinstance(axis, dict), 'Axis must be an object')
@@ -93,6 +105,10 @@ def validate(value):
         argv(workload.get('command'))
         positive(workload.get('timeoutSeconds', 300), 'timeoutSeconds', 86400)
         positive(workload.get('warmIterations', 3), 'warmIterations', 10000)
+        if 'measuredWorkerRoles' in workload:
+            roles = workload['measuredWorkerRoles']
+            require(isinstance(roles, list) and roles and all(isinstance(role, str) for role in roles)
+                    and len(set(roles)) == len(roles) and set(roles) <= MEASURED_WORKER_ROLES, 'Unknown/duplicate measured worker role')
         require(isinstance(workload.get('prepare', []), list), 'prepare must contain argv arrays')
         for command in workload.get('prepare', []):
             argv(command)
