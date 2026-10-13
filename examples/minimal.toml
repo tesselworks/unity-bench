@@ -1,0 +1,72 @@
+# Example campaign: every built-in workload plus one project adapter, on the tiny project in minimal-unity/.
+# Edit the two editor paths, then:   python3 unity-bench.py run examples/minimal.toml
+name = "minimal-example"
+
+[project]
+path = "minimal-unity"           # relative to this file; copied per variant, your working tree is never touched
+
+[defaults]
+repeats = 3                      # fresh Editor processes per variant per workload (the unit of repeat)
+rounds = 4                       # iterations inside one Editor process (round 0 is labelled first-use)
+baseline = "unity-6.7"           # ratios are other / baseline
+
+[[variants]]
+id = "unity-6.7"
+editor = "/Applications/Unity/Hub/Editor/6000.7.0b2/Unity.app/Contents/MacOS/Unity"
+# Windows: "C:/Program Files/Unity/Hub/Editor/6000.7.0b2/Editor/Unity.exe"
+backend = "mono"                 # scripting backend of the player builds
+# code_optimization = "release"  # Editor code optimization: debug | release (omit to keep the Editor's own setting)
+# revision = "<git commit>"      # build this variant from a different commit of the project's repository
+
+[[variants]]
+id = "unity-7"
+editor = "/Applications/Unity/Hub/Editor/7000.0.0a7/Unity.app/Contents/MacOS/Unity"
+backend = "coreclr"
+
+[[workloads]]
+id = "cold-open"
+kind = "editor.cold_open"
+repeats = 4                      # the first open of each project copy is first-use (import, and migration on a newer Editor)
+
+[[workloads]]
+id = "warm-open"
+kind = "editor.warm_open"
+repeats = 4
+
+[[workloads]]
+id = "script-edit"
+kind = "editor.script_edit"
+targets = [
+  { id = "leaf",     path = "Assets/FeatureA/FeatureA.cs", change = "comment" },   # nothing depends on it
+  { id = "core",     path = "Assets/Core/Work.cs",         change = "comment" },   # every other assembly references it
+  { id = "core-api", path = "Assets/Core/Work.cs",         change = "api" },       # public API change: dependents recompile too
+]
+
+[[workloads]]
+id = "play-default"
+kind = "editor.play"
+domain_reload = "default"        # the project's own Enter Play Mode settings
+
+[[workloads]]
+id = "play-no-domain-reload"
+kind = "editor.play"
+domain_reload = "disabled"       # Enter Play Mode options: Reload Domain off
+
+[[workloads]]
+id = "hash-adapter"
+kind = "editor.adapter"
+method = "UnityBench.Example.HashAdapter.Run"
+args = { sha256_blocks = 32 }
+
+[[workloads]]
+id = "build-time"
+kind = "player.build_time"
+mode = "clean"
+rounds = 2                       # round 0 is first-use; builds are slow, keep this small
+repeats = 2
+
+[[workloads]]
+id = "startup"
+kind = "player.startup"
+build = "build-time"             # launch the player that build-time produced for each variant
+repeats = 4

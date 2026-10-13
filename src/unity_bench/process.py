@@ -114,3 +114,29 @@ def launch(argv, cwd, timeout, on_started=None, on_poll=None, on_finished=None):
         if on_finished is not None:
             on_finished()
     return code, (time.perf_counter() - start) * 1000, process.pid
+
+
+class Run:
+    """Outcome of `run`: `exit_code` is None when the process tree was killed on timeout."""
+
+    def __init__(self, exit_code, wall_ms, pid, timed_out):
+        self.exit_code, self.wall_ms, self.pid, self.timed_out = exit_code, wall_ms, pid, timed_out
+
+    @property
+    def ok(self):
+        return self.exit_code == 0 and not self.timed_out
+
+
+def run(argv, cwd, timeout, on_poll=None):
+    """Launch `argv` in an owned process tree, kill the whole tree on timeout, never raise for a timeout.
+
+    `on_poll(pid)` is called about every 250 ms while the process runs (used for host sampling).
+    """
+    pids = []
+    start = time.perf_counter()
+    poll = (lambda: on_poll(pids[0])) if on_poll else None
+    try:
+        code, wall_ms, pid = launch(argv, cwd, timeout, on_started=pids.append, on_poll=poll)
+    except TimeoutError:
+        return Run(None, (time.perf_counter() - start) * 1000, pids[0] if pids else None, True)
+    return Run(code, wall_ms, pid, False)

@@ -1,0 +1,85 @@
+[UnityBench] begin leaf 1
+
+
+[ScriptCompilation] Requested script compilation because: AssetDatabase observed changes in script compilation related files
+Asset Pipeline Refresh (id=4ebcb0df8237b46918884c46281e7bcb): Total: 0.006 seconds - Initiated by RefreshV2(NoUpdateAssetOptions)
+Starting: /Applications/Unity/Hub/Editor/7000.0.0a7/Unity.app/Contents/Resources/BuildPipeline/bee_backend --ipc --defer-dag-verification --dagfile="Library/Bee/200b0aEDbg.dag" --continue-on-failure -
+WorkingDir: /work/project
+ExitCode: 0 Duration: 0s314ms
+Processing assembly Library/Bee/artifacts/200b0aEDbg.dag/UnityBench.Example.FeatureA.dll, with 147 defines and 263 references
+processors: Unity.Jobs.CodeGen.JobsILPostProcessor, zzzUnity.Burst.CodeGen.BurstILPostProcessor
+1 processor(s) skipped this assembly
+running Unity.Jobs.CodeGen.JobsILPostProcessor
+*** Tundra build success (0.26 seconds), 5 items updated, 230 evaluated
+Reloading assemblies after finishing script compilation.
+Reloading assemblies after forced synchronous recompile.
+Begin MonoManager ReloadAssembly
+Total cache size 268194810
+Total cache size after purge 268194810, took 00:00:00.0373799
+Loaded Assemblies : TypeCache.Refresh : partial scan of changed assemblies
+Loaded Assemblies : Detect changed : assembly 'UnityBench.Example.FeatureA' is NOT up-to-date due to it is CHANGED
+Loaded Assemblies : Detect changed : detected 181 up-to-date assemblies and 1 non-up-to-date assemblies 
+Loaded Assemblies : Detect changed : AllLoadedAssembliesAreUnchanged = false
+Loaded Assemblies : Detect changed : KnownAssembliesAreExactlyTheSame = false
+Loaded Assemblies : TypeCache.Refresh : initializing pseudo-attribute cache
+Loaded Assemblies : TypeCache.Refresh : scanning assembly 'UnityBench.Example.FeatureA'
+Loaded Assemblies : TypeCache.Refresh : scanning assembly 'System.Private.CoreLib'
+Loaded Assemblies : Dependency graph rebuilt
+Loaded Assemblies : TypeCache.Refresh : DONE! age = 0
+[MODES] ModeService[none].Initialize
+[MODES] ModeService[none].LoadModes
+Native extension for iOS target not found
+Native extension for OSXStandalone target not found
+ScheduleIndexationOnStartup MainProcess:True IndexOnStartup:True
+Scripting: successfully reloaded assembly
+Domain Reload Profiling: 1208ms
+	BeginReloadAssembly (299ms)
+		DisableScriptedObjects (16ms)
+	RebuildNativeTypeToScriptingClass (14ms)
+	initialDomainReloadingComplete (15ms)
+	LoadAllAssembliesAndSetupDomain (68ms)
+		LoadAssemblies (49ms)
+		TypeCache.Refresh (3ms)
+		AnalyzeDomain (27ms)
+			BuildScriptInfoCaches (3ms)
+	FinalizeReload (812ms)
+		SetupLoadedEditorAssemblies (0ms)
+			InitializePlatformSupportModulesInManaged (17ms)
+			SetLoadedEditorAssemblies (3ms)
+			BeforeProcessingInitializeOnLoad (34ms)
+			ProcessInitializeOnLoadAttributes (297ms)
+			ProcessInitializeOnLoadMethodAttributes (7ms)
+		AwakeInstancesAfterBackupRestoration (14ms)
+	Serialization: 198ms
+		Read: 186ms, 954262 bytes
+		Write: 11ms, 986480 bytes
+Serialization during DomainReload: 198.26 ms / 1895.3 KB (read 186.74 ms / 931.9 KB, write 11.52 ms / 963.4 KB)
+
+Asset Pipeline Refresh (id=05c66c56349c9479999283765599ffa3): Total: 1.239 seconds - Initiated by StopAssetImportingV2(ForceSynchronousImport | ForceDomainReload)
+	(Values over 0.05ms)
+	Summary:
+		Imports: total=0 (actual=0, local cache=0, cache server=0)
+		Asset DB Process Time: managed=0 ms, native=827 ms
+		Asset DB Callback time: managed=1 ms, native=0 ms
+		Scripting: domain reloads=1, domain reload time=409 ms, compile time=0 ms, other=0 ms
+		Serialization: total=198.262 ms / 1895.8 KB (read=186.741 ms / 931.9 KB, write=11.522 ms / 963.9 KB)
+		Project Asset Count: scripts=35, non-scripts=3
+		Asset File Changes: new=0, changed=0, moved=0, deleted=0
+		Scan Filter Count: 0
+	InvokePackagesCallback: 0.913ms
+	Collect global state as custom dependencies: 0.273ms
+	CategorizeAssets: 0.173ms
+	CompileScripts: 0.228ms
+	ImportOutOfDateAssets: 812.517ms (811.855ms without children)
+		UnloadImportedAssets: 0.053ms
+		ImportSchedulerStart: 0.599ms
+	PostProcessAllAssets: 1.478ms
+		MonoPostProcessAllAssets: 1.478ms
+			AssetPostprocessor.OnPostprocessAllAssets 0.109ms
+			SpeedTree9Postprocessor.OnPostprocessAllAssets 0.092ms
+			EditModeScopePostprocessor.OnPostprocessAllAssets 0.060ms
+			ResourceTableCollectionPostprocessor.OnPostprocessAllAssets 0.060ms
+	Untracked: 421.746ms
+
+[Licensing::Client] Successfully resolved entitlement details
+[UnityBench] end leaf 1

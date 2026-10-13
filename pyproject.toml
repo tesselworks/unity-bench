@@ -5,8 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tesselworks-unity-bench"
 version = "0.1.0"
-description = "Explicit Unity benchmark campaigns with retained evidence and project adapters"
-requires-python = ">=3.10"
+description = "Compare Unity Editors and player backends on the same project with a fixed A/B schedule and per-process medians"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+host = ["psutil"]
 
 [project.scripts]
 unity-bench = "unity_bench.cli:main"

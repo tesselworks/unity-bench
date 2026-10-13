@@ -1,5 +1,3 @@
 {
-  "dependencies": {
-    "com.tesselworks.unity-bench": "file:../../../packages/com.tesselworks.unity-bench"
-  }
+  "dependencies": {}
 }

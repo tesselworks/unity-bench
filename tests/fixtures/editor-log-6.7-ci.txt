@@ -1,0 +1,44 @@
+TypeManager.Initialize took: 173ms
+Start HTTP server: port:7800
+ScheduleIndexationOnStartup MainProcess:True IndexOnStartup:True
+Scripting: successfully reloaded assembly
+- Finished resetting the current domain, in  1.712 seconds
+Domain Reload Profiling: 3065ms
+	BeginReloadAssembly (250ms)
+		DisableScriptedObjects (20ms)
+		CreateAndSetChildDomain (52ms)
+	RebuildCommonClasses (8ms)
+	RebuildNativeTypeToScriptingClass (15ms)
+	initialDomainReloadingComplete (90ms)
+	LoadAllAssembliesAndSetupDomain (989ms)
+		LoadAssemblies (378ms)
+		TypeCache.Refresh (253ms)
+			TypeCache.ScanAssembly (232ms)
+		AnalyzeDomain (64ms)
+			BuildScriptInfoCaches (59ms)
+			ResolveRequiredComponents (4ms)
+	FinalizeReload (1713ms)
+		SetupLoadedEditorAssemblies (0ms)
+			LogAssemblyErrors (3ms)
+			BeforeProcessingInitializeOnLoad (104ms)
+			ProcessInitializeOnLoadAttributes (509ms)
+			ProcessInitializeOnLoadMethodAttributes (167ms)
+			AfterProcessingInitializeOnLoad (7ms)
+		AwakeInstancesAfterBackupRestoration (17ms)
+	Serialization: 171ms
+		Read: 126ms, 10345295 bytes
+		Write: 44ms, 172574 bytes
+Starting new worker id: 0 with log in C:/work/project/Logs/AssetImportWorkerHW0.log
+
+Asset Pipeline Refresh (id=e68e718bdedea4345892236b6e914bc9): Total: 6.615 seconds - Initiated by InitialRefreshV2(ForceSynchronousImport)
+	(Values over 0.05ms)
+	Summary:
+		Imports: total=2 (actual=2, local cache=0, cache server=0)
+		Asset DB Process Time: managed=2 ms, native=2260 ms
+		Asset DB Callback time: managed=106 ms, native=17 ms
+		Scripting: domain reloads=1, domain reload time=1437 ms, compile time=2790 ms, other=0 ms
+		Serialization: total=178.740 ms / 10561.3 KB (read=127.628 ms / 10258.0 KB, write=51.112 ms / 303.3 KB)
+		Project Asset Count: scripts=1360, non-scripts=2372
+		Asset File Changes: new=3, changed=3, moved=0, deleted=0
+		Scan Filter Count: 0
+	InvokePackagesCallback: 14.129ms
