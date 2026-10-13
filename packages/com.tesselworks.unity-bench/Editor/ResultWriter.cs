@@ -29,6 +29,17 @@ namespace UnityBench.Editor
                 for (var c = 0; c < m.counters.Count; c++) b.Append(c > 0 ? "," : "").Append(Json.Quote(m.counters[c].k)).Append(':').Append(Json.Num(m.counters[c].v));
                 b.Append("},\"info\":").Append(Object(m.info)).Append('}');
             }
+            b.Append("],\"distributions\":[");
+            for (var i = 0; i < s.distributions.Count; i++)
+            {
+                var d = s.distributions[i];
+                b.Append(i > 0 ? "," : "").Append("{\"name\":").Append(Json.Quote(d.name)).Append(",\"phase\":").Append(Json.Quote(d.phase));
+                b.Append(",\"hash\":").Append(Json.OrNull(d.hash)).Append(",\"counters\":{");
+                for (var c = 0; c < d.counters.Count; c++) b.Append(c > 0 ? "," : "").Append(Json.Quote(d.counters[c].k)).Append(':').Append(Json.Num(d.counters[c].v));
+                b.Append("},\"values\":[");
+                for (var v = 0; v < d.values.Count; v++) b.Append(v > 0 ? "," : "").Append(Json.Num(d.values[v]));
+                b.Append("]}");
+            }
             b.Append("],\"notes\":").Append(Object(s.notes)).Append('}');
             return b.ToString();
         }

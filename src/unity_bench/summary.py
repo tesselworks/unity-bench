@@ -67,14 +67,16 @@ def identity(samples, variants):
     return {'status': 'differs', 'detail': 'unstable within ' + ', '.join(unstable) if unstable else 'variants differ', 'values': shown}
 
 
-def summarise(rows, exclude_first_use=True, include_differing=False, baseline=None, variant_order=None):
+def summarise(rows, exclude_first_use=True, include_differing=False, baseline=None, variant_order=None, baselines=None):
     """Build the summary dict that report.py renders and summary.json stores."""
     processes = [r for r in rows if r['type'] == 'process']
     samples = [r for r in rows if r['type'] == 'sample']
     reloads = [r for r in rows if r['type'] == 'reload']
     variants = variant_order or list(dict.fromkeys(r['variant'] for r in processes))
     baseline = baseline if baseline in variants else (variants[0] if variants else None)
-    out = {'baseline': baseline, 'variants': variants, 'exclude_first_use': exclude_first_use, 'workloads': [],
+    # Each variant's ratio is taken against its own baseline (a campaign with Debug and Release pairs compares within each pair).
+    base_of = {v: (baselines or {}).get(v) if (baselines or {}).get(v) in variants else baseline for v in variants}
+    out = {'baseline': baseline, 'baselines': base_of, 'variants': variants, 'exclude_first_use': exclude_first_use, 'workloads': [],
            'failures': [{k: p.get(k) for k in ('index', 'workload', 'variant', 'repeat', 'status', 'error')} for p in processes if p['status'] != 'ok']}
     for workload in dict.fromkeys(p['workload'] for p in processes):
         mine = [s for s in samples if s['workload'] == workload]
@@ -93,7 +95,7 @@ def summarise(rows, exclude_first_use=True, include_differing=False, baseline=No
                     per_variant[v] = stats
             ident = identity(item_samples, entry['variants'])
             row = {'name': name, 'variants': per_variant, 'identity': ident, 'info': info_summary(steady, entry['variants']),
-                   'ratios': {v: compare(per_variant.get(baseline), per_variant.get(v)) for v in entry['variants'] if v != baseline}}
+                   'ratios': {v: compare(per_variant.get(base_of[v]), per_variant.get(v)) for v in entry['variants'] if base_of[v] != v}}
             target = entry['differing'] if ident['status'] == 'differs' and not include_differing else entry['items']
             if per_variant or ident['status'] == 'differs':
                 target.append(row)
@@ -101,7 +103,7 @@ def summarise(rows, exclude_first_use=True, include_differing=False, baseline=No
                 fs = [s['ms'] for s in first if s['variant'] == v]
                 if fs:
                     entry['first_use'].append({'name': name, 'variant': v, 'ms': fs})
-        entry['aggregate'] = aggregate(entry['items'], [v for v in entry['variants'] if v != baseline])
+        entry['aggregate'] = aggregate(entry['items'], [v for v in entry['variants'] if base_of[v] != v])
         entry['reload'] = reload_table(workload, reloads, entry['variants'], exclude_first_use)
         out['workloads'].append(entry)
     out['host'] = host_summary(processes)

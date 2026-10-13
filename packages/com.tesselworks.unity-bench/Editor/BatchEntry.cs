@@ -168,8 +168,10 @@ namespace UnityBench.Editor
                     s.plan.Add(new Step { name = "adapter", round = 0 });
                     break;
                 case "player.build_time":
-                    PrepareScene(req.scene);
                     PreparePlayerSettings();
+                    // Configured scenes are used as they are (a prebuild hook may still create them); otherwise a default scene is generated.
+                    if (req.scenes.Count > 0) s.buildScenes.AddRange(req.scenes);
+                    else { PrepareScene(null); s.buildScenes.Add(s.scenePath); }
                     for (var r = 0; r < req.rounds; r++) s.plan.Add(new Step { name = "build", round = r });
                     break;
                 default:
@@ -309,11 +311,14 @@ namespace UnityBench.Editor
             if (!Idle) return;
             Begin(step);
             var method = FindAdapter(s.req.method);
-            method.Invoke(null, new object[] { new AdapterContext(s.req, s.samples, s.notes) });
+            method.Invoke(null, new object[] { new AdapterContext(s.req, s.samples, s.distributions, s.notes) });
             End(step);
         }
 
-        static MethodInfo FindAdapter(string name)
+        static MethodInfo FindAdapter(string name) => FindStatic(name, new[] { typeof(AdapterContext) });
+
+        // A public or non-public static method looked up as Namespace.Type.Method with the given parameter types.
+        internal static MethodInfo FindStatic(string name, Type[] parameters)
         {
             var dot = name.LastIndexOf('.');
             var typeName = name.Substring(0, dot);
@@ -323,10 +328,10 @@ namespace UnityBench.Editor
                 foreach (var assembly in CompilationPipeline.GetAssemblies(kind))
                 {
                     var type = Type.GetType(typeName + ", " + assembly.name, false);
-                    var method = type?.GetMethod(methodName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, null, new[] { typeof(AdapterContext) }, null);
+                    var method = type?.GetMethod(methodName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, null, parameters, null);
                     if (method != null) return method;
                 }
-            throw new MissingMethodException("adapter not found: " + name + "(UnityBench.Editor.AdapterContext)");
+            throw new MissingMethodException("method not found: " + name + "(" + string.Join(", ", Array.ConvertAll(parameters, t => t.Name)) + ")");
         }
 
         // ---- events ------------------------------------------------------------------------------------------------

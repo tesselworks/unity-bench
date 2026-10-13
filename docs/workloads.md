@@ -1,8 +1,8 @@
 # Built-in workloads
 
-All built-in workloads work on any Unity project. Editor workloads run `Unity -batchmode -nographics`. Those that need to act inside the Editor use the batch entry in `packages/com.tesselworks.unity-bench`, which the runner copies into each variant's project copy (`project.inject_package`, default on). The package is Editor-only and compiles unchanged on Unity 6.7 (Mono) and Unity 7 (CoreCLR).
+All built-in workloads work on any Unity project. Editor workloads run `Unity -batchmode -nographics`. Those that need to act inside the Editor use the batch entry in `packages/com.tesselworks.unity-bench`, which the runner copies into each variant's project copy (`project.inject_package`, default on). The package compiles unchanged on Unity 6.7 (Mono) and Unity 7 (CoreCLR); its `Runtime/` part is inert unless a player is started with the arguments below.
 
-Common workload keys: `id`, `kind`, `repeats` (fresh processes per variant), `rounds` (iterations inside one Editor process), `timeout_seconds`, `variants` (restrict to some variant ids). Defaults come from `[defaults]`.
+Common workload keys: `id`, `kind`, `repeats` (fresh processes per variant), `rounds` (iterations inside one Editor or player process), `timeout_seconds`, `variants` (restrict to some variant ids). Defaults come from `[defaults]`.
 
 | Kind | Clock | Items reported | Notes |
 | --- | --- | --- | --- |
@@ -13,6 +13,7 @@ Common workload keys: `id`, `kind`, `repeats` (fresh processes per variant), `ro
 | `editor.adapter` | the adapter's own | the adapter's | see [adapters.md](adapters.md) |
 | `player.build_time` | stopwatch around `BuildPipeline.BuildPlayer` | `build` | clean or incremental |
 | `player.startup` | file timestamp from outside the player | `first_frame`, `first_frame_in_player`, `process_total` | launches a built player |
+| `player.adapter` | the adapter's own | the adapter's | see [adapters.md](adapters.md#player-adapter-playeradapter) |
 
 ## editor.cold_open and editor.warm_open
 
@@ -33,6 +34,8 @@ targets = [
   { id = "wide-api", path = "Assets/Core/Util.cs",     change = "api" },
 ]
 ```
+
+A target's `path` is project-relative. Set `root = "worktree"` for a file outside the Unity project (a package that lives beside it in the repository): `path` is then relative to the variant's git worktree, so every selected variant needs a `revision`.
 
 Each round, for each target: write the edit, `AssetDatabase.Refresh()`, then time
 - `<id>/compile`: until script compilation finished,
@@ -76,7 +79,8 @@ backend = "il2cpp"     # optional; default is the variant's backend (mono, il2cp
 rounds = 2
 repeats = 2
 development = false
-scene = "Assets/Scenes/Main.unity"   # optional; default is the generated empty scene
+scenes = ["Assets/Scenes/Main.unity"]   # optional; default is the generated empty scene
+prebuild = "MyNamespace.MyEditor.PrepareBuild"   # optional static void(), run in the Editor before each build, untimed
 ```
 
 Times `BuildPipeline.BuildPlayer` with a stopwatch, for the host platform's standalone target (`build_target` overrides). `clean` deletes the output and passes `BuildOptions.CleanBuildCache` every round. `incremental` does a full build in round 0 (first-use) and then rebuilds the same output with nothing changed. An unavailable backend fails the process with a clear error (CoreCLR exists only in Unity 7; a missing platform module also fails). Unity Bench never installs modules. The report also stores the build report's own total time and output size.
@@ -92,9 +96,21 @@ repeats = 5
 headless = true        # -batchmode -nographics; false opens a 640x360 window
 ```
 
-Launches the built player with `-unityBenchSignal <file>`. A small probe script (`PlayerProbe~/` in the package, copied into the project copy's `Assets/` for campaigns that use `player.*`) writes the file after the first full frame and quits. The runner takes the file's modification time minus the time just before launch as `first_frame`, so the clock does not depend on how often the runner polls. `first_frame_in_player` is `Time.realtimeSinceStartup` inside the player at that moment (it starts when the engine starts, so it excludes process spawn). `process_total` includes quitting. Repeat 0 is first-use: the first launch of a fresh build pays OS caches and code signing checks.
+Launches the built player with `-unityBenchSignal <file>`. A small probe in the package's `Runtime/` folder writes the file after the first full frame and quits. The runner takes the file's modification time minus the time just before launch as `first_frame`, so the clock does not depend on how often the runner polls. `first_frame_in_player` is `Time.realtimeSinceStartup` inside the player at that moment (it starts when the engine starts, so it excludes process spawn). `process_total` includes quitting. Repeat 0 is first-use: the first launch of a fresh build pays OS caches and code signing checks.
 
-Without `build`, the runner builds the player once per variant before the first launch; that build is stored as a process record with `role: setup-build` and is not part of any summary.
+Without `build`, the runner builds the player once per variant before the first launch (a later `player.startup` or `player.adapter` with the same backend, scenes, `development`, `build_target` and `prebuild` runs the same build); that build is stored as a process record with `role: setup-build` and is not part of any summary.
+
+## Preparing the project copy
+
+Some projects need a step before Unity can open them (stage a plugin, generate data, copy an adapter in). `[project] prepare` lists commands, each a list of strings, run once per variant in that variant's copy before the schedule starts. The working directory is the copy's root (the git worktree for variants with a `revision`, otherwise the copied project). Placeholders: `{python}` (the interpreter running Unity Bench), `{root}`, `{project}`, `{campaign}` (the campaign file's directory) and `{variant}`. A failing command stops the run before any measurement; its output is in `logs/prepare-<variant>-<n>.log`.
+
+```toml
+[project]
+path = "../unity/MyProject"
+prepare = [["{python}", "{campaign}/prepare.py", "--root", "{root}", "--project", "{project}"]]
+```
+
+Variants that no scheduled workload uses get no copy. `unity-bench run --work <dir>` puts the copies elsewhere than `<run dir>/work`; on Windows a short path keeps Library paths under the 260-character limit.
 
 ## Output files
 

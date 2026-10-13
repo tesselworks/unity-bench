@@ -16,6 +16,9 @@ editor = "/Applications/Unity/Hub/Editor/6000.7.0b2/Unity.app/Contents/MacOS/Uni
 # Windows: "C:/Program Files/Unity/Hub/Editor/6000.7.0b2/Editor/Unity.exe"
 backend = "mono"                 # scripting backend of the player builds
 # code_optimization = "release"  # Editor code optimization: debug | release (omit to keep the Editor's own setting)
+# To measure Debug and Release of both Editors, use four variants and name each one's baseline:
+#   unity-6.7-debug (baseline), unity-6.7-release (baseline = "unity-6.7-release"),
+#   unity-7-debug, unity-7-release (baseline = "unity-6.7-release"); each Unity 7 variant is compared with its 6.7 pair.
 # revision = "<git commit>"      # build this variant from a different commit of the project's repository
 
 [[variants]]
@@ -70,3 +73,13 @@ id = "startup"
 kind = "player.startup"
 build = "build-time"             # launch the player that build-time produced for each variant
 repeats = 4
+
+[[workloads]]
+id = "frames"
+kind = "player.adapter"
+method = "UnityBench.Example.PlayerAdapter.Run"
+args = { frames = 600, warmup_frames = 60 }
+build = "build-time"             # omit to build once per variant, backend and scene list (workloads with the same settings share it)
+headless = true                  # -batchmode -nographics; false opens a window
+repeats = 4
+rounds = 3

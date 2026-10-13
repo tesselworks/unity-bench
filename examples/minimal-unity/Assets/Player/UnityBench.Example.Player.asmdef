@@ -1,0 +1,5 @@
+{
+  "name": "UnityBench.Example.Player",
+  "rootNamespace": "UnityBench.Example",
+  "references": ["UnityBench.Player", "UnityBench.Example.Core"]
+}

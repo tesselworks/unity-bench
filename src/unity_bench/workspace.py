@@ -6,7 +6,6 @@ import time
 
 PACKAGE_NAME = 'com.tesselworks.unity-bench'
 SKIP_DIRS = {'Library', 'Temp', 'Logs', 'obj', 'UserSettings', '.git', 'Builds', '.vs', '.idea'}
-PLAYER_PROBE = 'PlayerProbe~'
 
 
 def framework_package():
@@ -25,7 +24,7 @@ def ignore(directory, names):
     return [n for n in names if n in SKIP_DIRS]
 
 
-def create(campaign, variant, work_root, use_player_probe):
+def create(campaign, variant, work_root):
     """Make `<work_root>/<variant id>` and return (project directory, worktree root or None).
 
     Without `revision` the project directory is copied (minus Library/Temp/...). With one, a detached
@@ -45,8 +44,6 @@ def create(campaign, variant, work_root, use_player_probe):
         project = target
     if campaign['project']['inject_package']:
         shutil.copytree(framework_package(), project / 'Packages' / PACKAGE_NAME, ignore=ignore)
-    if use_player_probe:
-        shutil.copytree(framework_package() / PLAYER_PROBE, project / 'Assets' / 'UnityBenchPlayerProbe')
     return project, worktree
 
 
