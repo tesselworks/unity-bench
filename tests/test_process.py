@@ -124,12 +124,16 @@ pathlib.Path(sys.argv[1]).write_text(f'{client.pid} {other.pid}')
 
     @unittest.skipUnless(os.name == 'posix', 'POSIX process ownership')
     def test_cleanup_report_names_what_was_terminated_and_wall_time_excludes_cleanup(self):
-        script = '''import pathlib, subprocess, sys
-subprocess.Popen([sys.executable, '-c', 'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])
+        script = '''import pathlib, subprocess, sys, time
+ready = pathlib.Path(sys.argv[1])
+subprocess.Popen([sys.executable, '-c', 'import pathlib,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(sys.argv[1]).write_text("x"); time.sleep(30)', sys.argv[1]])
+while not ready.exists():   # leave only once the child ignores SIGTERM, or cleanup could kill it instantly
+    time.sleep(0.01)
 '''
         report = {}
-        started = time.perf_counter()
-        code, elapsed_ms, _ = PROCESS.launch([sys.executable, '-c', script], '.', 10, report=report)
+        with tempfile.TemporaryDirectory() as directory:
+            started = time.perf_counter()
+            code, elapsed_ms, _ = PROCESS.launch([sys.executable, '-c', script, str(Path(directory) / 'ready')], '.', 10, report=report)
         total_ms = (time.perf_counter() - started) * 1000
         self.assertEqual(code, 0)
         self.assertEqual((len(report['terminated']), report['kept']), (1, []))
