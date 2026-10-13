@@ -1,5 +1,6 @@
 """player.adapter, build sharing, distributions, project.prepare, baselines per pair and worktree targets, with a fake Editor and player."""
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,7 +12,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 from unity_bench import config, distributions, runner, summary  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).parent))
+import fake_launcher  # noqa: E402
+
 FAKE = str(Path(__file__).with_name('fake_unity.py'))
+
+
+def failures(rows):
+    """One line per process that did not succeed, with its error, so a failed assertion says why."""
+    return [f"{r['workload']} {r['variant']} #{r['repeat']}: {r['status']}: {r['error']}" for r in rows if r['type'] == 'process' and r['status'] != 'ok']
 
 
 def editor(*options):
@@ -52,6 +61,8 @@ class DistributionTests(unittest.TestCase):
 
 class PlayerRunnerTests(unittest.TestCase):
     def setUp(self):
+        if os.name == 'nt' and fake_launcher.launcher() is None:
+            self.skipTest('no .NET Framework compiler to build a fake player .exe (the runner refuses batch files)')
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)
         (self.tmp / 'proj/Assets').mkdir(parents=True)
@@ -71,7 +82,7 @@ class PlayerRunnerTests(unittest.TestCase):
         path = self.campaign([{'id': 'a', 'editor': editor()}, {'id': 'b', 'editor': editor('--scale', '2'), 'baseline': 'a'}],
                              [{'id': 'pa', 'kind': 'player.adapter', 'method': 'My.Adapters.Run', 'args': {'echo': 'hi'}, 'rounds': 3, 'repeats': 3}])
         out, rows = self.run_campaign(path)
-        self.assertTrue(all(r['status'] == 'ok' for r in rows if r['type'] == 'process'))
+        self.assertEqual(failures(rows), [])
         by = {i['name']: i for i in json.loads((out / 'summary.json').read_text())['workloads'][0]['items']}
         self.assertEqual(sorted(by), ['alpha', 'frame steady max', 'frame steady p50', 'frame steady p95', 'frame steady p99', 'frame warmup max', 'frame warmup p50', 'frame warmup p95', 'frame warmup p99'])
         # steady frames are 1..100 ms scaled by the variant: nearest-rank p50 50, p95 95, p99 99, max 100; the warm-up is shown apart
@@ -96,7 +107,7 @@ class PlayerRunnerTests(unittest.TestCase):
                               {'id': 'other-backend', **shared, 'backend': 'mono'},
                               {'id': 'hooked', **shared, 'prebuild': 'My.Prebuild.Run'}])
         out, rows = self.run_campaign(path, keep_work=True)
-        self.assertTrue(all(r['status'] == 'ok' for r in rows if r['type'] == 'process'))
+        self.assertEqual(failures(rows), [])
         builds = setting(rows, 'setup-build')
         # per variant: default settings (one, two, startup), another scene list, another backend, another prebuild hook
         self.assertEqual(len(builds), 2 * 4)
@@ -112,7 +123,7 @@ class PlayerRunnerTests(unittest.TestCase):
                               {'id': 'pa', 'kind': 'player.adapter', 'method': 'My.A.Run', 'build': 'build', 'repeats': 2}])
         out, rows = self.run_campaign(path)
         self.assertEqual(setting(rows, 'setup-build'), [])
-        self.assertEqual([r['status'] for r in rows if r['type'] == 'process' and r['workload'] == 'pa'], ['ok', 'ok'])
+        self.assertEqual(failures(rows), [])
         bad = self.campaign([{'id': 'a', 'editor': editor('--fail')}],
                             [{'id': 'build', 'kind': 'player.build_time', 'repeats': 1, 'rounds': 1},
                              {'id': 'pa', 'kind': 'player.adapter', 'method': 'My.A.Run', 'build': 'build', 'repeats': 1}])
@@ -127,7 +138,7 @@ class PlayerRunnerTests(unittest.TestCase):
                              [{'id': 'pa', 'kind': 'player.adapter', 'method': 'My.A.Run', 'repeats': 1, 'timeout_seconds': 2}])
         out, rows = self.run_campaign(path)
         status = {r['variant']: (r['status'], r['error']) for r in rows if r['type'] == 'process' and r.get('role') is None}
-        self.assertEqual(status['ok'][0], 'ok')
+        self.assertEqual(status['ok'], ('ok', None))
         self.assertEqual(status['crash'][0], 'failed')
         self.assertEqual(status['hang'][0], 'timeout')
         self.assertEqual(status['error'][0], 'failed')
@@ -138,6 +149,7 @@ class PlayerRunnerTests(unittest.TestCase):
     def test_player_startup_still_works_with_the_shared_build_path(self):
         path = self.campaign([{'id': 'a', 'editor': editor()}], [{'id': 'startup', 'kind': 'player.startup', 'repeats': 3}])
         _, rows = self.run_campaign(path)
+        self.assertEqual(failures(rows), [])
         names = [r['name'] for r in rows if r['type'] == 'sample']
         self.assertEqual(names.count('first_frame_in_player'), 3)
         self.assertEqual(len(setting(rows, 'setup-build')), 1)
@@ -199,7 +211,7 @@ class PlayerRunnerTests(unittest.TestCase):
         path = self.tmp / 'c.json'
         path.write_text(json.dumps(cfg))
         out, rows = self.run_campaign(path, keep_work=True)
-        self.assertTrue(all(r['status'] == 'ok' for r in rows if r['type'] == 'process'))
+        self.assertEqual(failures(rows), [])
         for variant in ('a', 'b'):
             request = json.loads(next((out / 'requests').glob(f'*edit-{variant}.json')).read_text())
             targets = {t['id']: t['path'] for t in request['targets']}

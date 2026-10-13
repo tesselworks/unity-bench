@@ -19,9 +19,10 @@ import json
 import os
 from pathlib import Path
 import shlex
-import subprocess
 import sys
 import time
+
+import fake_launcher
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--scale', type=float, default=1.0)
@@ -78,8 +79,7 @@ def write_player(output_dir):
     options += ['--fail'] * ours.player_fail + ['--hang'] * ours.player_hang + ['--player-error'] * ours.player_error
     output_dir.mkdir(parents=True, exist_ok=True)
     if os.name == 'nt':
-        launcher = output_dir / 'UnityBenchPlayer.bat'
-        launcher.write_text('@echo off\r\n' + subprocess.list2cmdline(options) + ' %*\r\n')
+        launcher = fake_launcher.write(output_dir, options)
     else:
         launcher = output_dir / 'UnityBenchPlayer'
         launcher.write_text('#!/bin/sh\nexec ' + ' '.join(shlex.quote(x) for x in options) + ' "$@"\n')
