@@ -4,7 +4,7 @@ A campaign is one TOML (or JSON) file: variants (Unity Editor + optional project
 revision + player scripting backend), workloads, and how often to repeat them.
 """
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 
 import tomllib
@@ -28,6 +28,12 @@ BACKENDS = ('mono', 'il2cpp', 'coreclr')
 class ConfigError(ValueError):
     pass
 
+
+
+def project_relative(path):
+    """True for a relative path inside the project on every OS: no root, no drive, no '..' (checked as POSIX and Windows)."""
+    posix, windows = PurePosixPath(path), PureWindowsPath(path)
+    return not (posix.is_absolute() or windows.root or windows.drive) and '..' not in posix.parts and '..' not in windows.parts
 
 def require(condition, message):
     if not condition:
@@ -134,7 +140,7 @@ def check_kind(w):
             identifier(t.get('id'), 'target.id')
             require(t['id'] not in seen, f'workload {wid}: duplicate target {t["id"]}')
             seen.add(t['id'])
-            require(isinstance(t.get('path'), str) and t['path'].endswith('.cs') and not Path(t['path']).is_absolute() and '..' not in Path(t['path']).parts,
+            require(isinstance(t.get('path'), str) and t['path'].endswith('.cs') and project_relative(t['path']),
                     f'workload {wid}: target path must be a project-relative .cs file')
             t.setdefault('change', 'comment')
             require(t['change'] in TARGET_CHANGES, f'workload {wid}: target change must be one of {TARGET_CHANGES}')
