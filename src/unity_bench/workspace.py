@@ -68,6 +68,10 @@ def create(campaign, variant, work_root):
     """
     source = Path(campaign['project']['path'])
     target = Path(work_root) / variant['id']
+    if target.exists():
+        if any(p.is_file() for p in target.rglob('*')):
+            raise FileExistsError(f'{target} already exists and has files in it (left behind by an earlier run?); delete it or choose another --work directory')
+        shutil.rmtree(target, ignore_errors=True)   # only empty directories: what a surviving process kept from a finished run
     worktree = None
     info = {'revision': variant.get('revision'), 'warnings': []}
     if variant.get('revision'):
@@ -87,11 +91,22 @@ def create(campaign, variant, work_root):
 
 
 def remove(project_dir, worktree):
+    """Delete a variant's copy and return None, or return its path when something still holds it.
+
+    A shared Unity daemon that survived cleanup (see process.py) can have the copy as its working directory, which on Windows
+    keeps that directory from being deleted; the contents go, the empty directory may stay until the daemon exits.
+    """
+    target = Path(worktree[1] if worktree else project_dir)
     if worktree:
-        repo, target = worktree
-        subprocess.run(['git', '-C', str(repo), 'worktree', 'remove', '--force', str(target)], capture_output=True)
-    else:
-        shutil.rmtree(Path(project_dir), ignore_errors=True)
+        subprocess.run(['git', '-C', str(worktree[0]), 'worktree', 'remove', '--force', str(target)], capture_output=True)
+    for attempt in range(3):
+        shutil.rmtree(target, ignore_errors=True)
+        if not target.exists():
+            break
+        time.sleep(1.5)
+    if worktree:
+        subprocess.run(['git', '-C', str(worktree[0]), 'worktree', 'prune'], capture_output=True)
+    return str(target) if target.exists() else None
 
 
 def remove_library(project):

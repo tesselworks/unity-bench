@@ -36,7 +36,7 @@ Fixes from two independent reviews of v0.2 and its first Windows campaign. Philo
 - A malformed adapter result (a `null` or string sample, non-finite counters, an unknown phase, ...) is a recorded process failure (`ResultError`); any exception in a scheduled process is recorded and the schedule continues.
 - `unity-bench run` exits 3 when a process failed, never ran, or left a (workload, variant) without samples (after running everything it could).
 - Windows: cleanup no longer terminates `Unity.Licensing.Client` (and any process whose image name starts with `unity.licensing`); POSIX does the same by signalling the group member by member. What was terminated and what was kept is recorded and shown. Win32 error codes appear in `windows_process` errors.
-- A project that already embeds the Unity package gets it replaced in the copy, instead of an error.
+- A project that already embeds the Unity package gets it replaced in the copy, instead of an error. A copy that cannot be deleted because a surviving shared daemon holds it is reported (`left_behind`) and a later run reuses it once it is empty.
 
 ### Packaging
 

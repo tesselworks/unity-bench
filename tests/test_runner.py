@@ -220,6 +220,19 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('uncommitted', md)
         subprocess.run(['git', '-C', str(repo), 'worktree', 'prune'], capture_output=True)
 
+    def test_copies_are_removed_and_a_directory_kept_by_a_survivor_does_not_break_the_next_run(self):
+        campaign = {'project': {'path': str(self.tmp / 'proj'), 'repository': None, 'inject_package': False}}
+        work = self.tmp / 'w'
+        project, worktree, _ = workspace.create(campaign, {'id': 'a'}, work)
+        self.assertIsNone(workspace.remove(project, worktree))
+        self.assertFalse((work / 'a').exists())
+        (work / 'a/Deep/Er').mkdir(parents=True)                                      # an empty tree left by a process that held it open
+        project, worktree, _ = workspace.create(campaign, {'id': 'a'}, work)
+        self.assertTrue((project / 'Assets/A.cs').is_file())
+        with self.assertRaisesRegex(FileExistsError, 'left behind by an earlier run'):
+            workspace.create(campaign, {'id': 'a'}, work)                              # real files are never deleted for the user
+        self.assertIsNone(workspace.remove(project, worktree))
+
     def test_a_plain_copy_warns_about_file_dependencies_outside_the_project(self):
         (self.tmp / 'proj/Packages').mkdir()
         (self.tmp / 'proj/Packages/manifest.json').write_text(json.dumps({'dependencies': {'com.x.inside': 'file:Local', 'com.x.outside': 'file:../../shared/pkg', 'com.x.reg': '1.0.0'}}))

@@ -298,8 +298,11 @@ def run_campaign(config_path, out, keep_work=False, only=None, work=None, log=pr
     finally:
         campaign.results.close()
         if not keep_work:
-            for vid, project in campaign.projects.items():
-                workspace.remove(project, campaign.worktrees[vid])
+            left = [path for vid, project in campaign.projects.items() if (path := workspace.remove(project, campaign.worktrees[vid]))]
+            if left:
+                record['left_behind'] = left
+                write_campaign(out, record)
+                log('could not remove (a process still has it open?): ' + ', '.join(left))
             shutil.rmtree(out / 'builds', ignore_errors=True)   # built players are binaries; --keep-work keeps them
             try:
                 work.rmdir()

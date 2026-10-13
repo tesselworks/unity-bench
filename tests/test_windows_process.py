@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -328,23 +329,25 @@ class WindowsProcessNativeTests(unittest.TestCase):
         if client is None:
             self.skipTest('no .NET Framework compiler to build a fake licensing client')
         client_pid = None
+        directory = tempfile.mkdtemp()    # not a context manager: the surviving client has it as its working directory until it is killed
         try:
-            with tempfile.TemporaryDirectory() as directory:
-                receipt = Path(directory) / 'pids'
-                script = ('import pathlib,subprocess,sys; client=subprocess.Popen([sys.argv[2]]); '
-                          'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"]); '
-                          'pathlib.Path(sys.argv[1]).write_text(f"{client.pid} {child.pid}")')
-                report = {}
-                code, _, _ = WINDOWS.launch_windows([sys.executable, '-c', script, str(receipt), str(client)], directory, 10, report=report)
-                client_pid, child_pid = map(int, receipt.read_text().split())
-                self.assertEqual(code, 0)
-                self.assertTrue(self.process_stopped(child_pid))
-                self.assertFalse(self.process_stopped(client_pid), 'the licensing client must outlive the job')
-                self.assertEqual(report['kept'], ['Unity.Licensing.Client.exe'])
-                self.assertEqual(len(report['terminated']), 1)
+            receipt = Path(directory) / 'pids'
+            script = ('import pathlib,subprocess,sys; client=subprocess.Popen([sys.argv[2]]); '
+                      'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"]); '
+                      'pathlib.Path(sys.argv[1]).write_text(f"{client.pid} {child.pid}")')
+            report = {}
+            code, _, _ = WINDOWS.launch_windows([sys.executable, '-c', script, str(receipt), str(client)], directory, 10, report=report)
+            client_pid, child_pid = map(int, receipt.read_text().split())
+            self.assertEqual(code, 0)
+            self.assertTrue(self.process_stopped(child_pid))
+            self.assertFalse(self.process_stopped(client_pid), 'the licensing client must outlive the job')
+            self.assertEqual(report['kept'], ['Unity.Licensing.Client.exe'])
+            self.assertEqual(len(report['terminated']), 1)
         finally:
             if client_pid:
                 subprocess.run(['taskkill', '/F', '/PID', str(client_pid)], capture_output=True)
+                self.process_stopped(client_pid)
+            shutil.rmtree(directory, ignore_errors=True)
 
     def test_native_failures_carry_the_win32_error_code(self):
         with self.assertRaisesRegex(RuntimeError, r'could not be created \(Win32 error \d+'):
