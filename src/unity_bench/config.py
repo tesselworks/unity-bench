@@ -1,128 +1,180 @@
-"""A versioned, shell-free campaign contract."""
-import hashlib
+"""Campaign file loading, validation and the fixed schedule.
+
+A campaign is one TOML (or JSON) file: variants (Unity Editor + optional project
+revision + player scripting backend), workloads, and how often to repeat them.
+"""
 import json
-import ntpath
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
-import string
 
-PLACEHOLDERS = {'checkout', 'project', 'unity', 'request', 'result', 'variant', 'workload', 'unityVersion', 'backend', 'revision'}
+import tomllib
 
+KINDS = {
+    'editor.cold_open': {'description': 'Delete Library, open the project in batchmode, quit.'},
+    'editor.warm_open': {'description': 'Open the project in batchmode with its Library, quit.'},
+    'editor.script_edit': {'description': 'Edit a script, time compile and compile+reload+idle.', 'keys': {'targets'}},
+    'editor.play': {'description': 'Enter and exit Play Mode.', 'keys': {'domain_reload', 'scene'}},
+    'editor.adapter': {'description': 'Run a project C# adapter inside the Editor.', 'keys': {'method', 'args'}},
+    'player.build_time': {'description': 'BuildPipeline.BuildPlayer wall time.', 'keys': {'mode', 'development', 'scene', 'build_target', 'backend'}},
+    'player.startup': {'description': 'Launch a built player until its first frame.', 'keys': {'development', 'scene', 'build_target', 'backend', 'build', 'headless', 'startup_timeout_seconds'}},
+}
+COMMON_KEYS = {'id', 'kind', 'repeats', 'rounds', 'timeout_seconds', 'variants'}
+VARIANT_KEYS = {'id', 'editor', 'unity_version', 'backend', 'code_optimization', 'revision'}
+DEFAULT_KEYS = {'repeats', 'rounds', 'timeout_seconds', 'exclude_first_use', 'baseline', 'build_timeout_seconds'}
+TARGET_CHANGES = ('comment', 'api')
+BACKENDS = ('mono', 'il2cpp', 'coreclr')
+
+
+class ConfigError(ValueError):
+    pass
+
+
+
+def project_relative(path):
+    """True for a relative path inside the project on every OS: no root, no drive, no '..' (checked as POSIX and Windows)."""
+    posix, windows = PurePosixPath(path), PureWindowsPath(path)
+    return not (posix.is_absolute() or windows.root or windows.drive) and '..' not in posix.parts and '..' not in windows.parts
 
 def require(condition, message):
     if not condition:
-        raise ValueError(message)
+        raise ConfigError(message)
 
 
-def positive(value, label, maximum):
-    require(type(value) is int and 0 < value <= maximum, label + ' must be a bounded positive integer')
+def identifier(value, what):
+    require(isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', value), f'{what} must match [A-Za-z0-9][A-Za-z0-9_.-]* (got {value!r})')
 
 
-def identifier(value):
-    require(isinstance(value, str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}', value), 'Invalid identifier')
+def positive_int(value, what):
+    require(type(value) is int and value > 0, f'{what} must be a positive integer')
 
 
-def absolute_identity(value):
-    # Stored Windows evidence must be replayable on a different OS without rewriting its paths/hashes.
-    return isinstance(value, str) and (Path(value).is_absolute() or ntpath.isabs(value))
+def unknown(table, allowed, what):
+    extra = sorted(set(table) - set(allowed))
+    require(not extra, f'{what}: unknown key(s) {", ".join(extra)}')
 
 
-def read_json(path):
-    def pairs(items):
-        value = {}
-        for key, item in items:
-            require(key not in value, 'Duplicate JSON field')
-            value[key] = item
-        return value
-    return json.loads(Path(path).read_text(encoding='utf-8'), object_pairs_hook=pairs)
-
-
-def argv(value):
-    require(isinstance(value, list) and value and all(isinstance(v, str) and v and '\0' not in v for v in value), 'Command must be nonempty argv, never shell text')
-    for token in value:
-        for _, field, spec, conversion in string.Formatter().parse(token):
-            if field is not None:
-                require(field in PLACEHOLDERS and not spec and not conversion, 'Unknown command placeholder')
-
-
-def validate(value):
-    require(isinstance(value, dict) and type(value.get('schemaVersion')) is int and value['schemaVersion'] == 1, 'Unsupported campaign schema')
-    identifier(value.get('name'))
-    require(isinstance(value.get('repository'), str) and value['repository'], 'Repository path required')
-    positive(value.get('repetitions', 3), 'repetitions', 100)
-    calibration = value.get('calibrationRepetitions', 3)
-    require(type(calibration) is int and 0 <= calibration <= 100, 'Invalid calibration count')
-    host = value.get('host', {'mode': 'none'})
-    require(isinstance(host, dict) and host.get('mode') in ('none', 'windows-shared-host'), 'Unknown host policy')
-    if host['mode'] == 'windows-shared-host':
-        threshold = host.get('foreignCpuReferencePercent', 3)
-        require(type(threshold) in (int, float) and threshold == 3, 'Shared-host foreign CPU reference is fixed at 3%')
-        require(host.get('backgroundCpuLimitPercent', .5) == .5, 'Owned background limit is fixed at 0.5%')
-    for key in ('variants', 'axes', 'workloads'):
-        require(isinstance(value.get(key), list) and value[key], key + ' cannot be empty')
-    variants = set()
-    for variant in value['variants']:
-        require(isinstance(variant, dict), 'Variant must be an object')
-        identifier(variant.get('id'))
-        require(variant['id'] not in variants, 'Duplicate variant')
-        variants.add(variant['id'])
-        require(isinstance(variant.get('revision'), str) and re.fullmatch('[0-9a-f]{40}', variant['revision']), 'Exact 40-character commit required')
-        for field in ('unityVersion', 'backend'):
-            require(isinstance(variant.get(field), str) and variant[field], 'Variant requires ' + field)
-        if 'unityExecutable' in variant:
-            require(absolute_identity(variant['unityExecutable']), 'Unity executable must be absolute')
-        if host['mode'] == 'windows-shared-host':
-            require(absolute_identity(variant.get('editorExecutable')), 'Host control requires exact installed Editor executable')
-    axes = set()
-    for axis in value['axes']:
-        require(isinstance(axis, dict), 'Axis must be an object')
-        identifier(axis.get('id'))
-        require(axis['id'] not in axes, 'Duplicate axis')
-        axes.add(axis['id'])
-        require(axis.get('left') in variants and axis.get('right') in variants and axis['left'] != axis['right'], 'Axis requires two distinct variants')
-    workloads = set()
-    for workload in value['workloads']:
-        require(isinstance(workload, dict), 'Workload must be an object')
-        identifier(workload.get('id'))
-        require(workload['id'] not in workloads, 'Duplicate workload')
-        workloads.add(workload['id'])
-        require(isinstance(workload.get('projectPath'), str), 'Project path must be a string')
-        path = Path(workload['projectPath'])
-        require(str(path) != '.' and not path.is_absolute() and '..' not in path.parts, 'Project path must stay inside checkout')
-        require(workload.get('mode') in ('samples', 'external'), 'Unknown clock mode')
-        argv(workload.get('command'))
-        positive(workload.get('timeoutSeconds', 300), 'timeoutSeconds', 86400)
-        positive(workload.get('warmIterations', 3), 'warmIterations', 10000)
-        require(isinstance(workload.get('prepare', []), list), 'prepare must contain argv arrays')
-        for command in workload.get('prepare', []):
-            argv(command)
-    return value
-
-
-def read(path):
+def load(path):
     path = Path(path).resolve()
-    value = validate(read_json(path))
-    repository = Path(value['repository'])
-    value['repository'] = str((path.parent / repository).resolve()) if not repository.is_absolute() else str(repository.resolve())
-    return value
+    if path.suffix == '.json':
+        raw = json.loads(path.read_text(encoding='utf-8'))
+    else:
+        raw = tomllib.loads(path.read_text(encoding='utf-8'))
+    return validate(raw, path.parent)
 
 
-def digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+def validate(raw, base):
+    """Return the campaign with defaults applied and paths resolved against `base`."""
+    require(isinstance(raw, dict), 'Campaign must be a table')
+    unknown(raw, {'name', 'project', 'defaults', 'variants', 'workloads'}, 'campaign')
+    identifier(raw.get('name'), 'name')
+    project = raw.get('project') or {}
+    unknown(project, {'path', 'repository', 'inject_package'}, 'project')
+    require(isinstance(project.get('path'), str) and project['path'], 'project.path is required')
+    base = Path(base)
+    root = (base / project['path']).resolve()
+    inject = project.get('inject_package', True)
+    require(isinstance(inject, bool), 'project.inject_package must be a boolean')
+    repository = (base / project['repository']).resolve() if project.get('repository') else None
+
+    defaults = {'repeats': 4, 'rounds': 5, 'timeout_seconds': 1800, 'build_timeout_seconds': 3600,
+                'exclude_first_use': True, 'baseline': None, **(raw.get('defaults') or {})}
+    unknown(defaults, DEFAULT_KEYS, 'defaults')
+    for key in ('repeats', 'rounds', 'timeout_seconds', 'build_timeout_seconds'):
+        positive_int(defaults[key], 'defaults.' + key)
+    require(isinstance(defaults['exclude_first_use'], bool), 'defaults.exclude_first_use must be a boolean')
+
+    variants, ids = [], set()
+    require(isinstance(raw.get('variants'), list) and raw['variants'], 'At least one [[variants]] entry is required')
+    for v in raw['variants']:
+        unknown(v, VARIANT_KEYS, 'variant')
+        identifier(v.get('id'), 'variant.id')
+        require(v['id'] not in ids, f'Duplicate variant {v["id"]}')
+        ids.add(v['id'])
+        editor = v.get('editor')
+        require(isinstance(editor, str) and editor or isinstance(editor, list) and editor and all(isinstance(x, str) for x in editor),
+                f'variant {v["id"]}: editor must be the Unity executable path (or a command list that ends up running one)')
+        require(v.get('backend', 'mono') in BACKENDS, f'variant {v["id"]}: backend must be one of {BACKENDS}')
+        require(v.get('code_optimization', 'default') in ('default', 'debug', 'release'), f'variant {v["id"]}: code_optimization must be default, debug or release')
+        require(v.get('revision') is None or isinstance(v['revision'], str), f'variant {v["id"]}: revision must be a string')
+        variants.append({'backend': 'mono', 'code_optimization': 'default', 'unity_version': None, 'revision': None, **v})
+    if defaults['baseline'] is not None:
+        require(defaults['baseline'] in ids, 'defaults.baseline must name a variant')
+    else:
+        defaults['baseline'] = variants[0]['id']
+
+    workloads, wids = [], set()
+    require(isinstance(raw.get('workloads'), list) and raw['workloads'], 'At least one [[workloads]] entry is required')
+    for w in raw['workloads']:
+        require(w.get('kind') in KINDS, f'workload kind must be one of {", ".join(KINDS)}')
+        unknown(w, COMMON_KEYS | KINDS[w['kind']].get('keys', set()), 'workload ' + str(w.get('id')))
+        identifier(w.get('id'), 'workload.id')
+        require(w['id'] not in wids, f'Duplicate workload {w["id"]}')
+        wids.add(w['id'])
+        merged = {k: defaults[k] for k in ('repeats', 'rounds', 'timeout_seconds')}
+        if w['kind'].startswith('player.build') or w['kind'] == 'player.startup':
+            merged['timeout_seconds'] = defaults['build_timeout_seconds']
+        merged.update(w)
+        for key in ('repeats', 'rounds', 'timeout_seconds'):
+            positive_int(merged[key], f'workload {w["id"]}.{key}')
+        selected = merged.setdefault('variants', [v['id'] for v in variants])
+        require(isinstance(selected, list) and selected and set(selected) <= ids, f'workload {w["id"]}: variants must be a list of known variant ids')
+        check_kind(merged)
+        workloads.append(merged)
+    for w in workloads:
+        if w['kind'] == 'player.startup' and w.get('build'):
+            ref = [x for x in workloads if x['id'] == w['build']]
+            require(ref and ref[0]['kind'] == 'player.build_time', f'workload {w["id"]}: build must name a player.build_time workload')
+            require(set(w['variants']) <= set(ref[0]['variants']), f'workload {w["id"]}: build workload must cover the same variants')
+    return {'name': raw['name'], 'project': {'path': str(root), 'repository': str(repository) if repository else None, 'inject_package': inject},
+            'defaults': defaults, 'variants': variants, 'workloads': workloads}
 
 
-def schedule(config):
-    """Freeze all processes before execution; no replacement or quiet selection."""
+def check_kind(w):
+    kind, wid = w['kind'], w['id']
+    if kind == 'editor.script_edit':
+        targets = w.get('targets')
+        require(isinstance(targets, list) and targets, f'workload {wid}: targets must be a non-empty list')
+        seen = set()
+        for t in targets:
+            unknown(t, {'id', 'path', 'change'}, f'workload {wid} target')
+            identifier(t.get('id'), 'target.id')
+            require(t['id'] not in seen, f'workload {wid}: duplicate target {t["id"]}')
+            seen.add(t['id'])
+            require(isinstance(t.get('path'), str) and t['path'].endswith('.cs') and project_relative(t['path']),
+                    f'workload {wid}: target path must be a project-relative .cs file')
+            t.setdefault('change', 'comment')
+            require(t['change'] in TARGET_CHANGES, f'workload {wid}: target change must be one of {TARGET_CHANGES}')
+    elif kind == 'editor.play':
+        w.setdefault('domain_reload', 'default')
+        require(w['domain_reload'] in ('default', 'disabled'), f'workload {wid}: domain_reload must be default or disabled')
+        w.setdefault('scene', None)
+    elif kind == 'editor.adapter':
+        require(isinstance(w.get('method'), str) and re.fullmatch(r'[\w.]+\.\w+', w['method']), f'workload {wid}: method must be Namespace.Type.Method')
+        args = w.setdefault('args', {})
+        require(isinstance(args, dict) and all(isinstance(k, str) and isinstance(v, (str, int, float, bool)) for k, v in args.items()), f'workload {wid}: args must be a flat table')
+    elif kind in ('player.build_time', 'player.startup'):
+        w.setdefault('development', False)
+        w.setdefault('scene', None)
+        w.setdefault('build_target', None)
+        require(w.get('backend') is None or w['backend'] in BACKENDS, f'workload {wid}: backend must be one of {BACKENDS}')
+        if kind == 'player.build_time':
+            w.setdefault('mode', 'clean')
+            require(w['mode'] in ('clean', 'incremental'), f'workload {wid}: mode must be clean or incremental')
+        else:
+            w.setdefault('build', None)
+            w.setdefault('headless', True)
+            positive_int(w.setdefault('startup_timeout_seconds', 120), f'workload {wid}.startup_timeout_seconds')
+
+
+def schedule(campaign, only=None):
+    """Freeze every process before anything runs. Order rotates per repeat: A,B then B,A (then A,B ...)."""
     rows = []
-    for workload in config['workloads']:
-        for variant in config['variants']:
-            for repeat in range(config.get('calibrationRepetitions', 3)):
-                rows.append({'kind': 'calibration', 'axis': None, 'pair': repeat, 'variant': variant['id'], 'workload': workload['id']})
-        for axis in config['axes']:
-            for pair in range(config.get('repetitions', 3)):
-                order = (axis['left'], axis['right']) if pair % 2 == 0 else (axis['right'], axis['left'])
-                for variant in order:
-                    rows.append({'kind': 'comparison', 'axis': axis['id'], 'pair': pair, 'variant': variant, 'workload': workload['id']})
-    for index, row in enumerate(rows):
-        row['index'] = index
+    for w in campaign['workloads']:
+        if only and w['id'] not in only:
+            continue
+        order = [v['id'] for v in campaign['variants'] if v['id'] in w['variants']]
+        for repeat in range(w['repeats']):
+            shift = repeat % len(order)
+            for variant in order[shift:] + order[:shift]:
+                rows.append({'index': len(rows), 'workload': w['id'], 'variant': variant, 'repeat': repeat})
     return rows

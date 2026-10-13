@@ -1,0 +1,5 @@
+{
+  "name": "UnityBench.Example.FeatureB",
+  "rootNamespace": "UnityBench.Example",
+  "references": ["UnityBench.Example.Core"]
+}

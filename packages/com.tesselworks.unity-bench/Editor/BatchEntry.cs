@@ -1,413 +1,382 @@
+// Batch entry for the built-in Editor workloads and project adapters.
+//
+//   Unity -batchmode -nographics -projectPath <p> -logFile <log> -executeMethod UnityBench.Editor.BatchEntry.Run -unityBenchRequest <request.json>
+//
+// No -quit: the session exits the Editor itself when the result file is written. One process runs one workload.
+// Progress lives in SessionState, so it survives the script reload that an edit causes. The same source compiles on
+// Unity 6.7 (Mono) and Unity 7 (CoreCLR): static state is rebuilt on every load, from both the static constructor
+// (Mono domain reload) and [OnCodeLoaded] (CoreCLR code reload); Recover is idempotent.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Reflection;
-using System.Security.Cryptography;
-using System.Text;
-using System.Threading;
 using UnityEditor;
+using UnityEditor.Compilation;
 using UnityEngine;
+#if UNITY_6000_7_OR_NEWER
+using Unity.Scripting.LifecycleManagement;
+#endif
 
 namespace UnityBench.Editor
 {
-    public static class BatchEntry
+    [InitializeOnLoad]
+    public static partial class BatchEntry
     {
-        private const int IdleHoldPollingDelayMs = 50;
-        [Serializable]
-        private sealed class Request
+        const string Key = "UnityBench.Session";
+        const double StepTimeoutSeconds = 900;
+        const string RestorePrefix = "restore:";
+
+        static State s;
+
+        static BatchEntry() { Recover(); }
+#if UNITY_6000_7_OR_NEWER
+        [OnCodeLoaded] static void CodeLoaded() { Recover(); }
+        [OnCodeUnloading] static void CodeUnloading() { Detach(); }
+#endif
+
+        static void Recover()
         {
-            public int schemaVersion;
-            public string runId;
-            public string variant;
-            public string workload;
-            public string outputPath;
-            public int warmIterations;
-            public bool preparationOnly;
-            public string sourceRevision;
-            public string planDigest;
-            public string readyPath;
-            public string startPath;
-            public string finishedPath;
-            public string releasePath;
-            public int handshakeTimeoutSeconds;
-            [NonSerialized] public string RequestSha256;
+            var json = SessionState.GetString(Key, "");
+            if (string.IsNullOrEmpty(json)) return;
+            s = JsonUtility.FromJson<State>(json);
+            // A load after a compile finished is the reload an edit step waits for. A load during a Play Mode step is
+            // the domain/code reload that entering or exiting Play Mode did cause; with reload disabled none happens.
+            if (s.started && !s.reloaded && (s.compileEnd != 0 || s.req.kind == "editor.play")) s.reloaded = true;
+            Save();
+            Detach();
+            EditorApplication.update += Tick;
+            EditorApplication.playModeStateChanged += OnPlayMode;
+            CompilationPipeline.compilationFinished += OnCompilationFinished;
+            CompilationPipeline.assemblyCompilationFinished += OnAssemblyCompiled;
         }
 
-        [Serializable]
-        private sealed class Signal
+        static void Detach()
         {
-            public string runId;
-            public int processId;
-            public string utc;
-            public string requestSha256;
+            EditorApplication.update -= Tick;
+            EditorApplication.playModeStateChanged -= OnPlayMode;
+            CompilationPipeline.compilationFinished -= OnCompilationFinished;
+            CompilationPipeline.assemblyCompilationFinished -= OnAssemblyCompiled;
         }
 
-        private sealed class Sample
-        {
-            public int Iteration;
-            public double Milliseconds;
-        }
-
-        private static Coordinator active;
-
-        private sealed class Coordinator
-        {
-            private enum Phase { WaitingForInitialEditorIdle, WaitingForPreparedEditorIdle, WaitingForStart, WaitingForRelease }
-            private readonly Request request;
-            private readonly IWorkload workload;
-            private readonly Stopwatch wait = new Stopwatch();
-            private readonly List<Sample> samples = new List<Sample>();
-            private WorkProof proof;
-            private string startedUtc = "", completedUtc = "";
-            private Phase phase;
-            private bool exited;
-
-            internal Coordinator(Request request, IWorkload workload)
-            {
-                this.request = request;
-                this.workload = workload;
-            }
-
-            internal void Begin()
-            {
-                phase = Phase.WaitingForInitialEditorIdle;
-                wait.Start();
-                // Return from executeMethod so import/compilation services can advance.
-                EditorApplication.update += Tick;
-            }
-
-            private static bool EditorIdle => !EditorApplication.isCompiling && !EditorApplication.isUpdating;
-
-            internal void Tick()
-            {
-                if (exited) return;
-                try
-                {
-                    if (phase == Phase.WaitingForInitialEditorIdle || phase == Phase.WaitingForPreparedEditorIdle)
-                    {
-                        if (wait.Elapsed.TotalSeconds >= 120)
-                            throw new TimeoutException("Editor preparation did not become idle before its bound.");
-                        if (!EditorIdle) return;
-                        if (phase == Phase.WaitingForInitialEditorIdle)
-                        {
-                            workload.Prepare();
-                            phase = Phase.WaitingForPreparedEditorIdle;
-                            // Yield one Editor update after preparation, which may request imports.
-                            // Both idle phases share the original 120-second preparation bound.
-                            return;
-                        }
-                        if (request.preparationOnly)
-                        {
-                            startedUtc = UtcNow();
-                            workload.Execute();
-                            proof = workload.CaptureProof();
-                            ValidateProof(proof);
-                            completedUtc = UtcNow();
-                            // A full-work compatibility/cache prime, with no operation stopwatch.
-                            WriteResult(request, "prepared", proof, samples, startedUtc, completedUtc);
-                            Exit(0);
-                            return;
-                        }
-                        WriteSignal(request.readyPath, request);
-                        phase = Phase.WaitingForStart;
-                        wait.Restart();
-                        return;
-                    }
-                    if (wait.Elapsed.TotalSeconds >= request.handshakeTimeoutSeconds)
-                        throw new TimeoutException("Lifecycle signal did not arrive before its bound.");
-                    if (phase == Phase.WaitingForStart)
-                    {
-                        if (!ReadSignalIfPresent(request.startPath, request))
-                        {
-                            YieldIdleWait();
-                            return;
-                        }
-                        if (!EditorIdle)
-                            throw new InvalidOperationException("Editor became busy before the measurement start.");
-                        Measure();
-                        phase = Phase.WaitingForRelease;
-                        wait.Restart();
-                        return;
-                    }
-                    if (ReadSignalIfPresent(request.releasePath, request)) Exit(0);
-                    else YieldIdleWait();
-                }
-                catch (Exception) { Fail(); }
-            }
-
-            private static void YieldIdleWait()
-            {
-                // Batchmode can spin the update loop at one full core. Throttle only
-                // idle start/release holds, outside operation clocks, then return to
-                // the Editor so compilation/import services can continue advancing.
-                if (EditorIdle) Thread.Sleep(IdleHoldPollingDelayMs);
-            }
-
-            private void Measure()
-            {
-                startedUtc = UtcNow();
-                for (var iteration = 0; iteration <= request.warmIterations; iteration++)
-                {
-                    var watch = Stopwatch.StartNew();
-                    workload.Execute();
-                    watch.Stop();
-                    var elapsed = watch.Elapsed.TotalMilliseconds;
-                    if (!Finite(elapsed) || elapsed < 0)
-                        throw new InvalidOperationException("Invalid measured time.");
-                    var next = workload.CaptureProof();
-                    ValidateProof(next);
-                    if (proof != null && !Equal(proof, next))
-                        throw new InvalidOperationException("Work or output changed between iterations.");
-                    proof = new WorkProof { InputFingerprint = next.InputFingerprint,
-                        OutputFingerprint = next.OutputFingerprint,
-                        WorkCounters = new Dictionary<string, double>(next.WorkCounters) };
-                    samples.Add(new Sample { Iteration = iteration, Milliseconds = elapsed });
-                }
-                completedUtc = UtcNow();
-                WriteResult(request, "completed", proof, samples, startedUtc, completedUtc);
-                WriteSignal(request.finishedPath, request, completedUtc);
-            }
-
-            internal void Fail()
-            {
-                WriteFailure(request, startedUtc, completedUtc);
-                Exit(1);
-            }
-
-            private void Exit(int code)
-            {
-                if (exited) return;
-                exited = true;
-                EditorApplication.update -= Tick;
-                active = null;
-                EditorApplication.Exit(code);
-            }
-        }
-
-        // Call with -batchmode -executeMethod UnityBench.Editor.BatchEntry.Run
-        // -unityBenchRequest /absolute/request.json. Do not add -quit: this owns exit.
-        public static void Run()
-        {
-            if (!Application.isBatchMode)
-                throw new InvalidOperationException("Unity Bench requires an explicit batch invocation.");
-            if (active != null)
-                throw new InvalidOperationException("A Unity Bench invocation is already active.");
-            Request request = null;
-            try
-            {
-                request = ReadRequest();
-                active = new Coordinator(request, Workloads.Create(request.workload));
-                active.Begin();
-            }
-            catch (Exception)
-            {
-                if (active != null) active.Fail();
-                else { WriteFailure(request, "", ""); EditorApplication.Exit(1); }
-            }
-        }
-
-        private static void WriteFailure(Request request, string startedUtc, string completedUtc)
-        {
-            // No request content, paths, source payloads or exception messages in stdout.
-            UnityEngine.Debug.LogError("Unity Bench failed; no performance result may be adopted.");
-            if (request == null || File.Exists(request.outputPath)) return;
-            try { WriteResult(request, "failed", null, new List<Sample>(), startedUtc, completedUtc); }
-            catch (Exception) { UnityEngine.Debug.LogError("Unity Bench could not write its failure receipt."); }
-        }
-
-        private static Request ReadRequest()
+        static void Save() { if (s != null) SessionState.SetString(Key, JsonUtility.ToJson(s)); }
+        static long Now => Stopwatch.GetTimestamp();
+        static double Ms(long from, long to) => (to - from) * 1000.0 / Stopwatch.Frequency;
+        static bool Idle => !EditorApplication.isCompiling && !EditorApplication.isUpdating;
+        static string Arg(string name)
         {
             var args = Environment.GetCommandLineArgs();
-            string path = null;
-            for (var i = 0; i < args.Length; i++)
-                if (args[i] == "-unityBenchRequest")
+            var i = Array.IndexOf(args, name);
+            return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+        }
+
+        public static void Run()
+        {
+            Request request;
+            try { request = JsonUtility.FromJson<Request>(File.ReadAllText(Arg("-unityBenchRequest"))); }
+            catch (Exception e)
+            {
+                UnityEngine.Debug.LogError("[UnityBench] cannot read request: " + e.Message);
+                EditorApplication.Exit(2);
+                return;
+            }
+            s = new State { req = request };
+            s.stepStart = Now;
+            Save();
+            Recover();
+        }
+
+        static void Tick()
+        {
+            if (s == null || s.phase == "done") return;
+            try { Advance(); }
+            catch (Exception e) { s.error = (e is TargetInvocationException && e.InnerException != null ? e.InnerException : e).ToString(); Complete(1); }
+        }
+
+        static void Advance()
+        {
+            if (!string.IsNullOrEmpty(s.error)) throw new InvalidOperationException(s.error);
+            if (Ms(s.stepStart, Now) > StepTimeoutSeconds * 1000) throw new TimeoutException("step " + s.phase + " " + s.cursor);
+            if (s.phase == "setup") Setup(); else RunStep();
+        }
+
+        // ---- setup: Editor settings the variant asks for, then the plan ---------------------------------------------
+
+        static void Setup()
+        {
+            switch (s.setupStage)
+            {
+                case 0:
+                    if (!Idle) return;
+                    var want = s.req.codeOptimization;
+                    if (want != "default" && !string.Equals(CompilationPipeline.codeOptimization.ToString(), want, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Session-only setting (it does not persist to the next Editor process), so nothing needs restoring.
+                        s.started = true; s.reloaded = false; s.compileEnd = 0; s.stepStart = Now; s.setupStage = 1; Save();
+                        CompilationPipeline.codeOptimization = (CodeOptimization)Enum.Parse(typeof(CodeOptimization), want, true);
+                    }
+                    else s.setupStage = 2;
+                    return;
+                case 1:
+                    // Changing code optimization recompiles and reloads. If nothing happened within 30 s, carry on.
+                    if (s.compileEnd != 0 && s.reloaded && Idle) { s.setupStage = 2; s.started = false; }
+                    else if (s.compileEnd == 0 && Idle && Ms(s.stepStart, Now) > 30000) { s.setupStage = 2; s.started = false; }
+                    return;
+                case 2:
+                    if (!Idle) return;
+                    s.started = false;
+                    BuildPlan();
+                    s.phase = "run"; s.stepStart = Now; Save();
+                    return;
+            }
+        }
+
+        static void BuildPlan()
+        {
+            var req = s.req;
+            switch (req.kind)
+            {
+                case "editor.script_edit":
+                    foreach (var t in req.targets)
+                    {
+                        var full = Path.Combine(ProjectRoot, t.path);
+                        if (!File.Exists(full)) throw new FileNotFoundException("target script not found: " + t.path);
+                        s.originals.Add(new Pair { k = t.path, v = File.ReadAllText(full) });
+                    }
+                    // An api edit changes the assembly's public surface, so putting the file back is itself an API change. Each api
+                    // edit is therefore followed by an untimed restore step, which keeps the next edit measuring only what it claims.
+                    for (var r = 0; r < req.rounds; r++)
+                        foreach (var t in req.targets)
+                        {
+                            s.plan.Add(new Step { name = t.id, round = r });
+                            if (t.change == "api") s.plan.Add(new Step { name = RestorePrefix + t.id, round = r });
+                        }
+                    break;
+                case "editor.play":
+                    PrepareScene(req.scene);
+                    if (req.domainReload == "disabled")
+                    {
+                        s.origPlayEnabled = EditorSettings.enterPlayModeOptionsEnabled;
+                        s.origPlayOptions = EditorSettings.enterPlayModeOptions.ToString();
+                        s.changedPlayOptions = true;
+                        EditorSettings.enterPlayModeOptionsEnabled = true;
+                        EditorSettings.enterPlayModeOptions = EnterPlayModeOptions.DisableDomainReload;
+                    }
+                    for (var r = 0; r < req.rounds; r++) { s.plan.Add(new Step { name = "enter", round = r }); s.plan.Add(new Step { name = "exit", round = r }); }
+                    break;
+                case "editor.adapter":
+                    s.plan.Add(new Step { name = "adapter", round = 0 });
+                    break;
+                case "player.build_time":
+                    PrepareScene(req.scene);
+                    PreparePlayerSettings();
+                    for (var r = 0; r < req.rounds; r++) s.plan.Add(new Step { name = "build", round = r });
+                    break;
+                default:
+                    throw new InvalidOperationException("Unknown workload kind " + req.kind);
+            }
+        }
+
+        static string ProjectRoot => Path.GetDirectoryName(Application.dataPath);
+
+        // A configured scene is opened as is; otherwise a default scene (camera, light) is generated under Assets/UnityBench.
+        static void PrepareScene(string scene)
+        {
+            if (!string.IsNullOrEmpty(scene))
+            {
+                if (!File.Exists(Path.Combine(ProjectRoot, scene))) throw new FileNotFoundException("scene not found: " + scene);
+                UnityEditor.SceneManagement.EditorSceneManager.OpenScene(scene, UnityEditor.SceneManagement.OpenSceneMode.Single);
+                s.scenePath = scene;
+                return;
+            }
+            s.scenePath = "Assets/UnityBench/Generated/Empty.unity";
+            Directory.CreateDirectory(Path.Combine(ProjectRoot, "Assets/UnityBench/Generated"));
+            var created = UnityEditor.SceneManagement.EditorSceneManager.NewScene(UnityEditor.SceneManagement.NewSceneSetup.DefaultGameObjects, UnityEditor.SceneManagement.NewSceneMode.Single);
+            UnityEditor.SceneManagement.EditorSceneManager.SaveScene(created, s.scenePath);
+            AssetDatabase.Refresh();
+        }
+
+        // ---- steps -------------------------------------------------------------------------------------------------
+
+        static void RunStep()
+        {
+            if (s.cursor >= s.plan.Count) { Complete(0); return; }
+            var step = s.plan[s.cursor];
+            switch (s.req.kind)
+            {
+                case "editor.script_edit": EditStep(step); break;
+                case "editor.play": PlayStep(step); break;
+                case "editor.adapter": AdapterStep(step); break;
+                case "player.build_time": BuildStep(step); break;
+            }
+        }
+
+        static void Begin(Step step)
+        {
+            s.started = true; s.reloaded = false; s.compileEnd = 0; s.assemblies = 0; s.enteredPlay = s.enteredEdit = 0;
+            // Markers let the log parser attribute reload and compile blocks to this step.
+            Mark("begin", step);
+            s.stepStart = Now; Save();
+        }
+
+        static void End(Step step)
+        {
+            Mark("end", step);
+            s.cursor++; s.started = false; s.stepStart = Now; Save();
+        }
+
+        static void Mark(string what, Step step) =>
+            UnityEngine.Debug.LogFormat(LogType.Log, LogOption.NoStacktrace, null, "[UnityBench] {0} {1} {2}", what, step.name, step.round);
+
+        static void AddSample(string name, double ms, int round, params string[] info)
+        {
+            var sample = new SampleRecord { name = name, ms = ms, round = round, phase = round == 0 ? "first-use" : "warm", hash = "" };
+            for (var i = 0; i + 1 < info.Length; i += 2) sample.info.Add(new Pair { k = info[i], v = info[i + 1] });
+            s.samples.Add(sample);
+        }
+
+        static string Flag(bool v) => v ? "true" : "false";
+
+        // editor.script_edit: change a script, refresh, time compile and compile+reload+idle.
+        //   comment: append a comment (no API change; Unity recompiles that assembly and, with it, only what must be)
+        //   api:     append a public class whose const changes each round (a public API change; dependents recompile)
+        static void EditStep(Step step)
+        {
+            var restoring = step.name.StartsWith(RestorePrefix);
+            var id = restoring ? step.name.Substring(RestorePrefix.Length) : step.name;
+            if (!s.started)
+            {
+                if (!Idle) return;
+                Begin(step);
+                var target = s.req.targets.Find(t => t.id == id);
+                var original = s.originals.Find(p => p.k == target.path).v;
+                var suffix = restoring ? "" : target.change == "api"
+                    ? "\npublic static class UnityBenchProbe_" + id.Replace('-', '_').Replace('.', '_') + " { public const int Round = " + step.round + "; }\n"
+                    : "\n// unity-bench edit " + step.round + "\n";
+                File.WriteAllText(Path.Combine(ProjectRoot, target.path), original + suffix);
+                AssetDatabase.Refresh();
+                return;
+            }
+            // Compile finished, the reload after it happened, and the Editor is idle again.
+            if (s.compileEnd == 0 || !s.reloaded || !Idle) return;
+            if (!restoring)
+            {
+                var info = new[] { "assemblies", s.assemblies.ToString(), "reloaded", Flag(s.reloaded) };
+                AddSample(id + "/compile", Ms(s.stepStart, s.compileEnd), step.round, info);
+                AddSample(id + "/compile+reload", Ms(s.stepStart, Now), step.round, info);
+            }
+            End(step);
+        }
+
+        // editor.play: EnterPlaymode until EnteredPlayMode plus one more frame; ExitPlaymode until EnteredEditMode.
+        static void PlayStep(Step step)
+        {
+            if (step.name == "enter")
+            {
+                if (!s.started)
                 {
-                    if (path != null || i + 1 >= args.Length)
-                        throw new ArgumentException("Invalid request argument.");
-                    path = args[++i];
+                    if (!Idle || EditorApplication.isPlaying) return;
+                    Begin(step);
+                    EditorApplication.EnterPlaymode();
+                    return;
                 }
-            if (path == null || !Path.IsPathRooted(path))
-                throw new ArgumentException("An absolute request path is required.");
-            var requestBytes = File.ReadAllBytes(path);
-            var request = JsonUtility.FromJson<Request>(new UTF8Encoding(false, true).GetString(requestBytes));
-            if (request == null || request.schemaVersion != 1 ||
-                string.IsNullOrWhiteSpace(request.runId) || string.IsNullOrWhiteSpace(request.variant) ||
-                string.IsNullOrWhiteSpace(request.workload) || string.IsNullOrWhiteSpace(request.outputPath) ||
-                !Path.IsPathRooted(request.outputPath) || request.warmIterations < 0 || request.warmIterations > 10000)
-                throw new ArgumentException("Invalid v1 request.");
-            request.outputPath = Path.GetFullPath(request.outputPath);
-            if (File.Exists(request.outputPath))
-                throw new IOException("A result must never overwrite an existing receipt.");
-            using (var sha = SHA256.Create())
-                request.RequestSha256 = BitConverter.ToString(sha.ComputeHash(requestBytes)).Replace("-", "").ToLowerInvariant();
-            var paths = new[] { request.readyPath, request.startPath, request.finishedPath, request.releasePath };
-            var count = 0;
-            foreach (var signalPath in paths) if (!string.IsNullOrWhiteSpace(signalPath)) count++;
-            if (request.preparationOnly)
-            {
-                if (count != 0 || request.warmIterations != 0 ||
-                    string.IsNullOrWhiteSpace(request.sourceRevision) || string.IsNullOrWhiteSpace(request.planDigest))
-                    throw new ArgumentException("Preparation-only requires no lifecycle paths, zero warm iterations and provenance.");
-                return request;
-            }
-            if (count != 4 || request.handshakeTimeoutSeconds < 1 || request.handshakeTimeoutSeconds > 120 ||
-                string.IsNullOrWhiteSpace(request.sourceRevision) || string.IsNullOrWhiteSpace(request.planDigest))
-                throw new ArgumentException("Lifecycle requires all four paths, bounded wait and provenance.");
-            {
-                var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { request.outputPath, Path.GetFullPath(path) };
-                foreach (var signalPath in paths)
-                    if (!Path.IsPathRooted(signalPath) || !unique.Add(Path.GetFullPath(signalPath)) || File.Exists(signalPath))
-                        throw new ArgumentException("Lifecycle paths must be distinct absolute new files.");
-            }
-            return request;
-        }
-
-        private static int ProcessId() { using (var process = Process.GetCurrentProcess()) return process.Id; }
-        private static string UtcNow() => DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
-
-        private static void WriteSignal(string path, Request request, string completedUtc = null)
-        {
-            var json = "{\"runId\":" + Quote(request.runId) + ",\"processId\":" + ProcessId().ToString(CultureInfo.InvariantCulture) +
-                ",\"requestSha256\":" + Quote(request.RequestSha256) +
-                ",\"utc\":" + Quote(completedUtc ?? UtcNow()) +
-                ",\"isCompiling\":" + (EditorApplication.isCompiling ? "true" : "false") +
-                ",\"isUpdating\":" + (EditorApplication.isUpdating ? "true" : "false") +
-                (completedUtc == null ? "" : ",\"completedUtc\":" + Quote(completedUtc)) + "}\n";
-            var temporary = path + "." + ProcessId().ToString(CultureInfo.InvariantCulture) + ".tmp";
-            WriteNew(temporary, json);
-            File.Move(temporary, path);
-        }
-
-        private static bool ReadSignalIfPresent(string path, Request request)
-        {
-            if (!File.Exists(path)) return false;
-            // The controller writes signals atomically; partial/malformed signals fail closed.
-            var signal = JsonUtility.FromJson<Signal>(File.ReadAllText(path, new UTF8Encoding(false, true)));
-            if (signal == null || signal.runId != request.runId || signal.processId != ProcessId() ||
-                signal.requestSha256 != request.RequestSha256 ||
-                string.IsNullOrWhiteSpace(signal.utc) ||
-                !(signal.utc.EndsWith("Z", StringComparison.Ordinal) || signal.utc.EndsWith("+00:00", StringComparison.Ordinal)) ||
-                !DateTimeOffset.TryParse(signal.utc, CultureInfo.InvariantCulture, DateTimeStyles.None, out var timestamp) ||
-                timestamp.Offset != TimeSpan.Zero)
-                throw new InvalidOperationException("Lifecycle signal identity or UTC is invalid.");
-            return true;
-        }
-
-        private static void WriteNew(string path, string json)
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(path));
-            using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            using (var writer = new StreamWriter(stream, new UTF8Encoding(false))) writer.Write(json);
-        }
-
-        private static bool Finite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
-        private static void ValidateProof(WorkProof proof)
-        {
-            if (proof == null || string.IsNullOrWhiteSpace(proof.InputFingerprint) ||
-                string.IsNullOrWhiteSpace(proof.OutputFingerprint) || proof.WorkCounters == null || proof.WorkCounters.Count == 0)
-                throw new InvalidOperationException("A workload requires input, output and work proof.");
-            foreach (var counter in proof.WorkCounters)
-                if (string.IsNullOrWhiteSpace(counter.Key) || !Finite(counter.Value) || counter.Value < 0)
-                    throw new InvalidOperationException("Invalid work counter.");
-        }
-
-        private static bool Equal(WorkProof left, WorkProof right)
-        {
-            if (left.InputFingerprint != right.InputFingerprint || left.OutputFingerprint != right.OutputFingerprint ||
-                left.WorkCounters.Count != right.WorkCounters.Count) return false;
-            foreach (var counter in left.WorkCounters)
-                if (!right.WorkCounters.TryGetValue(counter.Key, out var value) || value != counter.Value) return false;
-            return true;
-        }
-
-        private static string Backend()
-        {
-            if (Type.GetType("Mono.Runtime") != null) return "mono";
-            if (Type.GetType("System.Runtime.Loader.AssemblyLoadContext, System.Private.CoreLib") != null ||
-                Type.GetType("System.Runtime.Loader.AssemblyLoadContext, System.Runtime.Loader") != null) return "coreclr";
-            return "unknown";
-        }
-
-        private static object PublicSetting(string typeName, string member)
-        {
-            var type = Type.GetType(typeName);
-            if (type == null) return null;
-            var property = type.GetProperty(member, BindingFlags.Public | BindingFlags.Static);
-            if (property != null) return property.GetValue(null, null);
-            var field = type.GetField(member, BindingFlags.Public | BindingFlags.Static);
-            return field?.GetValue(null);
-        }
-
-        private static string Settings()
-        {
-            // Public runtime settings only. Missing APIs are marked unavailable, never guessed.
-            var workers = PublicSetting("Unity.Jobs.LowLevel.Unsafe.JobsUtility, UnityEngine.CoreModule", "JobWorkerCount");
-            var optimization = PublicSetting("UnityEditor.Compilation.CompilationPipeline, UnityEditor.CoreModule", "codeOptimization");
-            return "{\"batchMode\":" + (Application.isBatchMode ? "true" : "false") +
-                ",\"idleHoldPollingDelayMs\":" + IdleHoldPollingDelayMs.ToString(CultureInfo.InvariantCulture) +
-                ",\"jobWorkerCountAvailable\":" + (workers == null ? "false" : "true") +
-                ",\"jobWorkerCount\":" + (workers == null ? "null" : Convert.ToInt32(workers, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture)) +
-                ",\"codeOptimizationAvailable\":" + (optimization == null ? "false" : "true") +
-                ",\"codeOptimization\":" + (optimization == null ? "null" : Quote(optimization.ToString())) +
-                ",\"vSyncCount\":" + QualitySettings.vSyncCount.ToString(CultureInfo.InvariantCulture) +
-                ",\"targetFrameRate\":" + Application.targetFrameRate.ToString(CultureInfo.InvariantCulture) +
-                ",\"qualityLevel\":" + QualitySettings.GetQualityLevel().ToString(CultureInfo.InvariantCulture) + "}";
-        }
-
-        private static void WriteResult(Request request, string status, WorkProof proof, List<Sample> samples,
-            string startedUtc, string completedUtc)
-        {
-            var json = new StringBuilder("{\"schemaVersion\":1,\"runId\":").Append(Quote(request.runId))
-                .Append(",\"variant\":").Append(Quote(request.variant)).Append(",\"workload\":").Append(Quote(request.workload))
-                .Append(",\"processId\":").Append(ProcessId().ToString(CultureInfo.InvariantCulture))
-                .Append(",\"requestSha256\":").Append(Quote(request.RequestSha256))
-                .Append(",\"sourceRevision\":").Append(Quote(request.sourceRevision ?? ""))
-                .Append(",\"planDigest\":").Append(Quote(request.planDigest ?? ""))
-                .Append(",\"startedUtc\":").Append(Quote(startedUtc))
-                .Append(",\"completedUtc\":").Append(Quote(completedUtc))
-                .Append(",\"status\":").Append(Quote(status)).Append(",\"environment\":{\"unityVersion\":")
-                .Append(Quote(Application.unityVersion)).Append(",\"backend\":").Append(Quote(Backend()))
-                .Append(",\"executionKind\":\"editor-batch\",\"platform\":").Append(Quote(Application.platform.ToString()))
-                .Append(",\"settings\":").Append(Settings())
-                .Append("},\"inputFingerprint\":").Append(Quote(proof?.InputFingerprint ?? ""))
-                .Append(",\"outputFingerprint\":").Append(Quote(proof?.OutputFingerprint ?? ""))
-                .Append(",\"workCounters\":{");
-            if (proof != null)
-            {
-                var keys = new List<string>(proof.WorkCounters.Keys);
-                keys.Sort(StringComparer.Ordinal);
-                for (var i = 0; i < keys.Count; i++)
+                if (s.enteredPlay != 0 && EditorApplication.isPlaying && Time.frameCount > s.enteredFrame)
                 {
-                    if (i > 0) json.Append(',');
-                    json.Append(Quote(keys[i])).Append(':').Append(proof.WorkCounters[keys[i]].ToString("R", CultureInfo.InvariantCulture));
+                    AddSample("play_enter", Ms(s.stepStart, Now), step.round, "enteredPlayModeMs", Json.Num(Ms(s.stepStart, s.enteredPlay)), "reloaded", Flag(s.reloaded));
+                    End(step);
                 }
             }
-            json.Append("},\"samples\":[");
-            for (var i = 0; i < samples.Count; i++)
+            else
             {
-                if (i > 0) json.Append(',');
-                json.Append("{\"iteration\":").Append(samples[i].Iteration).Append(",\"phase\":")
-                    .Append(Quote(samples[i].Iteration == 0 ? "first" : "warm"))
-                    .Append(",\"metric\":\"executeWallTime\",\"value\":")
-                    .Append(samples[i].Milliseconds.ToString("R", CultureInfo.InvariantCulture)).Append(",\"unit\":\"ms\"}");
+                if (!s.started)
+                {
+                    if (!EditorApplication.isPlaying || EditorApplication.isCompiling) return;
+                    Begin(step);
+                    EditorApplication.ExitPlaymode();
+                    return;
+                }
+                if (s.enteredEdit != 0)
+                {
+                    AddSample("play_exit", Ms(s.stepStart, s.enteredEdit), step.round, "reloaded", Flag(s.reloaded));
+                    End(step);
+                }
             }
-            json.Append("]}\n");
-            WriteNew(request.outputPath, json.ToString());
         }
 
-        private static string Quote(string value)
+        // editor.adapter: call the project's entry point once. It measures its own work through AdapterContext.
+        static void AdapterStep(Step step)
         {
-            var text = new StringBuilder("\"");
-            foreach (var character in value)
+            if (!Idle) return;
+            Begin(step);
+            var method = FindAdapter(s.req.method);
+            method.Invoke(null, new object[] { new AdapterContext(s.req, s.samples, s.notes) });
+            End(step);
+        }
+
+        static MethodInfo FindAdapter(string name)
+        {
+            var dot = name.LastIndexOf('.');
+            var typeName = name.Substring(0, dot);
+            var methodName = name.Substring(dot + 1);
+            // Looked up through the compilation pipeline's assembly list; AppDomain.GetAssemblies can return unloaded assemblies.
+            foreach (var kind in new[] { AssembliesType.Editor, AssembliesType.PlayerWithoutTestAssemblies })
+                foreach (var assembly in CompilationPipeline.GetAssemblies(kind))
+                {
+                    var type = Type.GetType(typeName + ", " + assembly.name, false);
+                    var method = type?.GetMethod(methodName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, null, new[] { typeof(AdapterContext) }, null);
+                    if (method != null) return method;
+                }
+            throw new MissingMethodException("adapter not found: " + name + "(UnityBench.Editor.AdapterContext)");
+        }
+
+        // ---- events ------------------------------------------------------------------------------------------------
+
+        static void OnCompilationFinished(object context)
+        {
+            if (s == null || !s.started || s.compileEnd != 0) return;
+            if (s.phase == "setup" || s.req.kind == "editor.script_edit") { s.compileEnd = Now; Save(); }
+        }
+
+        static void OnAssemblyCompiled(string assembly, CompilerMessage[] messages)
+        {
+            if (s == null || !s.started) return;
+            s.assemblies++;
+            foreach (var m in messages)
+                if (m.type == CompilerMessageType.Error) s.error = "compile error in " + assembly + ": " + m.message;
+            Save();
+        }
+
+        static void OnPlayMode(PlayModeStateChange change)
+        {
+            if (s == null || !s.started || s.req.kind != "editor.play" || s.cursor >= s.plan.Count) return;
+            var step = s.plan[s.cursor];
+            if (change == PlayModeStateChange.EnteredPlayMode && step.name == "enter") { s.enteredPlay = Now; s.enteredFrame = Time.frameCount; Save(); }
+            if (change == PlayModeStateChange.EnteredEditMode && step.name == "exit") { s.enteredEdit = Now; Save(); }
+        }
+
+        // ---- result ------------------------------------------------------------------------------------------------
+
+        static void Complete(int code)
+        {
+            Detach();
+            s.phase = "done";
+            // Always put edited scripts and changed settings back, even after a failure. The runner checks the scripts too.
+            foreach (var o in s.originals)
             {
-                if (character == '\\' || character == '"') text.Append('\\').Append(character);
-                else if (character < 32 || char.IsSurrogate(character))
-                    text.Append("\\u").Append(((int)character).ToString("x4", CultureInfo.InvariantCulture));
-                else text.Append(character);
+                try { File.WriteAllText(Path.Combine(ProjectRoot, o.k), o.v); } catch { }
             }
-            return text.Append('"').ToString();
+            try
+            {
+                if (s.changedPlayOptions)
+                {
+                    EditorSettings.enterPlayModeOptionsEnabled = s.origPlayEnabled;
+                    EditorSettings.enterPlayModeOptions = (EnterPlayModeOptions)Enum.Parse(typeof(EnterPlayModeOptions), s.origPlayOptions);
+                }
+            }
+            catch { }
+            File.WriteAllText(s.req.outPath, ResultWriter.Build(s, code == 0));
+            SessionState.EraseString(Key);
+            EditorApplication.Exit(code);
         }
     }
 }

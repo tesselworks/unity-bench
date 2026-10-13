@@ -1,0 +1,6 @@
+{
+  "name": "UnityBench.Example.Editor",
+  "rootNamespace": "UnityBench.Example",
+  "references": ["UnityBench.Editor", "UnityBench.Example.Core"],
+  "includePlatforms": ["Editor"]
+}

@@ -12,3 +12,5 @@ campaigns/
 **/obj/
 **/UserSettings/
 **/Packages/packages-lock.json
+
+bench-runs/

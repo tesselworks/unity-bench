@@ -1,0 +1,49 @@
+TypeManager.Initialize took: 103ms
+Start HTTP server: port:7800
+ScheduleIndexationOnStartup MainProcess:True IndexOnStartup:True
+Scripting: successfully reloaded assembly
+Domain Reload Profiling: 3362ms
+	BeginReloadAssembly (1528ms)
+		DisableScriptedObjects (31ms)
+	RebuildCommonClasses (3ms)
+	RebuildNativeTypeToScriptingClass (11ms)
+	initialDomainReloadingComplete (73ms)
+	LoadAllAssembliesAndSetupDomain (152ms)
+		LoadAssemblies (358ms)
+		TypeCache.Refresh (780ms)
+			TypeCache.ScanAssembly (768ms)
+		AnalyzeDomain (64ms)
+			BuildScriptInfoCaches (61ms)
+	FinalizeReload (1595ms)
+		SetupLoadedEditorAssemblies (0ms)
+			BeforeProcessingInitializeOnLoad (75ms)
+			ProcessInitializeOnLoadAttributes (814ms)
+			ProcessInitializeOnLoadMethodAttributes (106ms)
+			AfterProcessingInitializeOnLoad (8ms)
+		AwakeInstancesAfterBackupRestoration (10ms)
+	Serialization: 225ms
+		Read: 157ms, 10412739 bytes
+		Write: 67ms, 172698 bytes
+Starting new worker id: 0 with log in C:/work/project/Logs/AssetImportWorkerHW0.log
+Loading style catalogs (8)
+	StyleSheets/Extensions/base/common.uss
+	UIPackageResources/StyleSheets/Default/Variables/Public/common.uss
+	StyleSheets/Northstar/common.uss
+	StyleSheets/Extensions/fonts/inter.uss
+	StyleSheets/Extensions/base/dark.uss
+	UIPackageResources/StyleSheets/Default/Northstar/Palette/dark.uss
+	Packages/com.unity.entities/Editor Default Resources/uss/StyleSheets/Extensions/common.uss
+	Packages/com.unity.entities/Editor Default Resources/uss/StyleSheets/Extensions/dark.uss
+
+Asset Pipeline Refresh (id=0530ac490c856ab469f1276f72f41e5f): Total: 6.816 seconds - Initiated by InitialRefreshV2(ForceSynchronousImport)
+	(Values over 0.05ms)
+	Summary:
+		Imports: total=2 (actual=2, local cache=0, cache server=0)
+		Asset DB Process Time: managed=1 ms, native=2092 ms
+		Asset DB Callback time: managed=144 ms, native=16 ms
+		Scripting: domain reloads=1, domain reload time=1846 ms, compile time=2715 ms, other=0 ms
+		Serialization: total=233.601 ms / 10824.9 KB (read=162.414 ms / 10521.5 KB, write=71.187 ms / 303.4 KB)
+		Project Asset Count: scripts=1354, non-scripts=2349
+		Asset File Changes: new=3, changed=3, moved=0, deleted=0
+		Scan Filter Count: 0
+	InvokePackagesCallback: 13.644ms

@@ -1,66 +1,71 @@
----
-type: guide
-date: 2026-10-09
-tags: [unity, benchmark, methodology]
----
+# Methodology
 
-# Measurement methodology
+Unity Bench answers one question: how does the same project behave on this Editor or player backend compared with that one? The method is deliberately plain. It records what happened and tells you where to be careful. It never refuses to run and never throws a measurement away.
 
-## Define the question first
+## Variants
 
-For an engine-version comparison, start from the same project revision and prepare each version independently. Record compatibility changes, package changes and generated inputs. A version difference is not automatically a runtime-only difference: importers, compilers, rendering packages and defaults may also change.
+A **variant** is a project revision, a Unity Editor, and a player scripting backend:
 
-For a real project upgrade comparison, separate revisions are useful, but the measured effect includes source and asset changes. Label that experiment as an upgrade comparison. For a code regression comparison, hold the Unity version and backend fixed and vary the revision.
+| Part | Where it comes from |
+| --- | --- |
+| project revision | `revision` (a git commit; the runner makes a detached worktree) or, if omitted, a copy of the project directory |
+| Unity Editor | `editor`, the path of the Unity executable |
+| scripting backend | `backend`: `mono`, `il2cpp` or `coreclr`. It applies to player builds and player startup. The Editor's own runtime is whatever that Editor ships and is reported by the Editor, not configured |
 
-The framework accepts exact variant identities; it does not repair version compatibility. A failed import or compile is evidence about compatibility, not a zero-duration sample.
+Every variant gets its own project copy, so Library, edits and builds never mix between variants or touch your working tree. Editor workloads can also set Editor **code optimization** (`debug` or `release`) per variant. That setting only lasts for the Editor session, so each process applies it itself (after opening, before the workload starts) and nothing leaks into your normal Editor. It therefore has no effect on `editor.cold_open` and `editor.warm_open`, which measure the open itself.
 
-## Give each workload an explicit clock
+## Schedule
 
-| Workload | Appropriate boundary | What must be recorded |
-|---|---|---|
-| First import into an empty Library | External launch through a defined import-ready condition | Initial cache state, package resolution, actual version, ready signal and exit status |
-| Editor startup with a prepared Library | External process launch through a defined ready condition | Cache preparation and all work included before readiness |
-| Script compilation and reload | Edit trigger through compilation/reload completion | Exact edit, domain/reload settings and persisted completion evidence |
-| Enter Play | Transition request through a defined playable state | Reload options, scene, initialization and actual completion |
-| Managed operation | In-process monotonic interval around the operation | Inputs, work counters, output identity, allocations if supported |
-| Player simulation or rendering | Project-defined in-process steps or frames | Runtime/backend, scene, physics/render settings and actual performed work |
+The schedule is fixed before anything runs (`unity-bench plan <campaign>` prints it):
 
-Writing metadata, serializing a result or launching an empty command is not a substitute for these workloads. A subprocess wall duration includes orchestration, startup and shutdown unless the adapter defines a narrower interval. Do not present it as frame time or import time.
+- For each workload, for each repeat, the variants run in rotated order: A, B then B, A then A, B, and so on. Rotating the order spreads slow drift (thermal state, caches, background work) over both variants instead of loading it onto one.
+- Every repeat is a **fresh process**. The process is the unit of repeat; a process may run several rounds internally.
+- Every process has an explicit timeout. On timeout the whole process tree is killed (POSIX process groups, Windows Job Objects), the process is recorded as `timeout`, and the schedule continues.
+- A failed process is recorded with its exit code or error and is left out of the numbers. It does not stop the campaign and it is not retried.
 
-“First-use” means the first measured operation in that process. It does not establish a cold OS cache, empty Library, first shader compile or first player launch. Likewise, a fresh process can use warm disk and Unity caches. Use separate campaign policies for cold preparation and warmed measurements; never silently erase another project's cache or alter machine services.
+## What is measured
 
-## Keep the plan fixed
+Built-in workloads measure wall time with the clock described in [workloads.md](workloads.md): the whole Editor process for opens, in-Editor stopwatches for edits, Play Mode and builds, a file timestamp for player startup. Project adapters bring their own stopwatch around exactly the work they care about ([adapters.md](adapters.md)).
 
-Choose workload sizes, repetitions, execution order, timeouts and refusal rules before observing results. The default paired schedule alternates direction: A/B, B/A, A/B. Each entry must launch the intended fresh measured process. Record all entries, including failures.
+Each measurement is a **sample** with a name, a `phase` and milliseconds. Phase is `first-use` for the first time something runs in a process (first round, first open of a project copy, first launch of a build) and `warm` after that. First-use samples pay one-off costs such as JIT, caches, project import and migration on a newer Editor, and code signing checks. They are labelled, kept in `results.jsonl`, listed in the report, and **excluded from the steady-state summary by default**. `report --include-first-use` (or `defaults.exclude_first_use = false`) includes them.
 
-Same-variant calibration is a distinct set of observations used to describe repeat noise. It does not convert three comparison pairs into a significance test. Do not replace slow runs with quiet ones, delete outliers, shrink the workload or raise host limits after viewing timings.
+## Summary
 
-## Compare equal work
+For each item (a sample name inside a workload) and variant:
 
-Project adapters must report identities derived from real inputs and outputs, not labels supplied by the configuration. Examples include generated asset bytes, loaded player content, deterministic state hashes, processed items, simulation steps and rendered frames. Backend and runtime must be detected by the actual measuring process.
+1. Take the samples of each process and compute that process's **median**.
+2. Report the **median across processes** of those medians, with the **min-max range** across processes and the process count `n`.
+3. For each non-baseline variant report the **ratio** other / baseline of those two medians. Below 1.00 means faster than the baseline.
+4. Mark the pair **"no overlap"** when the ranges are separated (the slowest process of the faster variant is faster than the fastest process of the slower one), otherwise "overlap".
 
-Exact input/output parity and matching work counters support a controlled comparison. They are necessary but do not prove all settings are equal. Physics frequency, solver settings, worker count, frame caps, quality level, rendering pipeline, build flags and instrumentation overhead also belong in project evidence.
+Medians of per-process medians stop one long process from dominating, and the range shows how much repeats disagree. For workloads with many items the report also gives the geometric mean of the ratios and how many items are separated in each direction.
 
-When the compiler produces different input bytes across versions, preserve that difference. A useful article can report both the compatibility/output difference and timings as explicitly diagnostic observations. Do not copy generated bytes across variants or rewrite the expected output just to obtain a ratio.
+This describes what happened in n processes. It is not a significance test. With n = 2 or 3 two ranges often fail to overlap by chance alone; read "no overlap" together with n and the range widths.
 
-## Separate preparation settling from measurement
+## Host load is an annotation
 
-A freshly launched Editor may still have compiler or import workers after its batch entry point becomes available. In the Windows shared-host profile, ready must report that the Editor is neither compiling nor updating. The controller retains every startup interval and waits within a fixed 120-second preparation budget for the first consecutive three seconds of complete post-ready intervals with total owned CPU no higher than 0.5%. Only then does it release the planned operation.
+While each process runs, the runner samples whole-machine CPU, the CPU of the launched process tree, and memory (this needs `psutil`; without it nothing is recorded). The report shows them per variant under "Host (annotation only)": machine CPU median/max, and "other" CPU, which is machine CPU minus the launched tree and so approximates what everything else was doing.
 
-Busy bootstrap intervals are diagnostic preparation evidence, not operation timings or a cold-import measurement. The report's eligibility window begins at the first qualifying settled-before interval, spans all measured and completion-held intervals and ends after process exit. Background CPU remains limited to 0.5% throughout that window, with the narrow validated completed-hold-to-quit bridge annotation. That bridge may cross the release timestamp only after an entire eligible completion hold proves the operation is finished; it ends before final after and does not exempt measured or held work. Foreign CPU above the fixed 3% reference remains annotated. Identity, unknown evidence, competing work, gaps and UTC/monotonic skew are still checked across the whole observed lifetime, including startup.
+Nothing depends on these numbers. No run is refused, delayed, retried or discarded because the machine was busy, and there are no quiet gates or settling handshakes. If a campaign must be quiet, make the machine quiet before you start, then read the annotations to confirm it was.
 
-This is waiting for the same planned process to become ready. It does not delete raw preparation records, discard timed samples, replace a process, choose a quiet measured suffix or rerun a result that was slow. A failed or timed-out preparation produces no accepted operation timing.
+## Work and output identity is flagged, not enforced
 
-## Summarize processes, then repetitions
+A workload can report, per sample, a **hash** of its output and **counters** of the work it did. The report compares them across all processes and variants for each item:
 
-Samples within one process share initialization, caches and runtime state. They are correlated observations. Report their process-level median, then the repeated process values and ranges. Keep first-use and warmed measurements distinct when the workload has those phases. A pooled sample count is not the count of independent experiments.
+| Status | Meaning |
+| --- | --- |
+| same | every reported hash/counter set is equal |
+| not reported | no sample carried a hash or counters (the built-in workloads) |
+| differs | something differs between variants, or one variant disagreed with itself between processes |
 
-Reports describe observed direction and magnitude. They do not claim automatic statistical significance, complete JIT convergence, universal engine speed, or pure CoreCLR effects. A clear result may be “mixed direction” or “the difference is not resolved by repeat variation.” A single overall average across unrelated workloads is not an upgrade recommendation.
+An item that differs is shown in a separate table with the differing values and "variants differ" or "unstable within <variant>", and is **excluded from the ratio table and from the geometric mean**, with a note saying so. `report --include-differing` puts it back in the main table. A different result can mean a different amount of work was done, in which case its ratio is not a speed comparison; it can also be harmless (a floating point sign bit). The tool tells you and you decide. Nothing blocks a run.
 
-## Host evidence and publication
+## Limits
 
-Fresh checkouts and immutable files do not prove an idle physical host. The optional Windows shared-host observer retains CPU, memory, competing work and ownership across the complete launch/hold/work/release/exit lifetime. Owned background work above 0.5% within the settled-before-to-after eligibility window remains a hard refusal except for the validated quit transition. Competing Editor/compiler/worker, missing identity/counters, observation gaps and clock skew remain hard across the complete observed lifetime. Foreign CPU above the fixed 3% reference is a retained annotation in an explicitly exploratory profile. Memory is diagnostic telemetry with no claim of causal attribution. The observer does not measure thermal behavior or establish an isolated machine; see the exact [replay and lifecycle contract](architecture.md).
-
-The quit bridge ends at the first native census proving all retained owned processes exited; the next complete after interval remains strict. The job API return alone does not define that boundary. The controller joins the anchored owned process objects within a fixed two-second bound while retaining shutdown CPU observations, then takes exactly the first census after object cleanup completes; it does not choose a later quiet census. A census absence during that bridge needs either signaled-object native exit proof or two nonsignaled process-object polls surrounding fresh pending-handle identity; eventual successful exit and strict final after remain mandatory. Modern host evidence uses schema 4 and does not admit earlier host summaries or mix their immutable results into a new campaign. See the [exit evidence contract](architecture.md) for exact identity, final-counter and first-census checks.
-
-Keep instrumentation runs separate from baseline timing runs when profiling changes overhead. Preserve all raw evidence privately; publish only reviewed, reproducible source/configuration and sanitized results. Owned objects use their first native query/synchronize handle; failed initial identity acquisition stays a documented refusal. A supported native-image fallback may prove the full path on that same object with an unambiguous current device mapping; failed or ambiguous queries stay refused. Owned terminal timestamps and final CPU come from the same post-signal native read; earlier partial reads remain evidence rather than being frozen or paired with a later exit. Record exact Editor builds, OS/hardware, compatibility changes, clock boundaries and refusal reasons alongside the article's result table.
+- The Editor runs in `-batchmode -nographics`. There is no GPU rendering, no window and no Inspector refresh. "A frame" in Play Mode is an update, not a presented image. Player startup is headless by default for the same reason.
+- n is small by design (minutes, not days). The report gives ranges, not p-values.
+- Built-in Editor workloads measure the Editor on your project, including its asset-pipeline and package state. They do not separate Unity's own cost from your project's.
+- A newer Editor migrates an older project on its first open. That cost is real but one-off, which is why it is first-use.
+- Absolute numbers belong to one machine at one moment. Ratios between variants measured in the same campaign travel better than the milliseconds do.
+- Player builds are slow, so their `rounds` and `repeats` are small by default and their ranges are wide.
+- Player runs write a `PlayerPrefs` file (macOS: `~/Library/Preferences/com.DefaultCompany.<variant>.plist`) because the player is built with the project's own player settings.

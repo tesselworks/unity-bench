@@ -1,7 +1,7 @@
 {
   "name": "com.tesselworks.unity-bench",
   "version": "0.1.0",
-  "displayName": "Tessel Works Unity Bench",
-  "description": "Explicit batch benchmark workload registration and result protocol. Private extraction preview; no public license grant.",
+  "displayName": "Unity Bench",
+  "description": "Editor-only batch entry for Unity Bench: built-in Editor workloads (script edit, Play Mode, player build) and the adapter API for project workloads.",
   "unity": "6000.0"
 }
