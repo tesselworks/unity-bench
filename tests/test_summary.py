@@ -311,6 +311,12 @@ class SummariseTests(unittest.TestCase):
 
 
 class ReportTextTests(unittest.TestCase):
+    def test_build_text_shows_a_value_the_editor_stored_instead_of_the_requested_one(self):
+        self.assertEqual(report.build_text({'apiCompatibility': 'NET', 'apiCompatibilityRequested': 'NET_Standard', 'stripping': 'Minimal'}),
+                         'API level NET (requested NET_Standard), stripping Minimal')
+        self.assertEqual(report.build_text({'apiCompatibility': 'NET_Standard'}), 'API level NET_Standard')
+        self.assertEqual(report.build_text(None), 'not recorded')
+
     def test_ratio_cell_states_n_and_separation(self):
         r = stats.compare(stats.describe([10, 11]), stats.describe([5, 6, 7]))
         self.assertEqual(report.ratio_cell(r), '0.57 (ranges separate, n=2 vs 3)')

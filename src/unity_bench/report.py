@@ -85,7 +85,10 @@ def env_text(env):
 def build_text(build):
     names = (('scriptingBackend', 'backend'), ('apiCompatibility', 'API level'), ('il2cppCodeGeneration', 'IL2CPP code generation'), ('il2cppCompiler', 'IL2CPP compiler'),
              ('stripping', 'stripping'))
-    return ', '.join(f'{label} {build[key]}' for key, label in names if (build or {}).get(key) is not None) or 'not recorded'
+    build = build or {}
+    # `<key>Requested` is present only when the Editor stored a different value than the campaign asked for.
+    return ', '.join(f'{label} {build[key]}' + (f" (requested {build[key + 'Requested']})" if build.get(key + 'Requested') else '')
+                     for key, label in names if build.get(key) is not None) or 'not recorded'
 
 
 def commit_text(info):

@@ -94,7 +94,7 @@ il2cpp_code_generation = "OptimizeSpeed"
 stripping = "Minimal"
 ```
 
-The values are looked up by name on the Editor (the enum names differ between Unity 6.7 and 7), so a value an Editor does not have fails that build with the list of valid names, instead of building with something else. Leave a key out to keep the project's own setting.
+The values are looked up by name on the Editor (the enum names differ between Unity 6.7 and 7), so a value an Editor does not have fails that build with the list of valid names, instead of building with something else. Leave a key out to keep the project's own setting. The Editor may also store a different value than the one it was given (Unity 7 stores `NET_Standard` as `NET` for IL2CPP); the build settings then read `API level NET (requested NET_Standard)`, and the raw notes carry `build.apiCompatibilityRequested`.
 
 `clean` removes the output folder and the Bee build cache; it does not clear the shader cache, the Library or OS file caches.
 

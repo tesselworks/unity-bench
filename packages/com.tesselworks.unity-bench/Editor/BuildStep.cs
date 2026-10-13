@@ -41,9 +41,9 @@ namespace UnityBench.Editor
                 PlayerSettings.SetScriptingBackend(NamedBuildTarget.Standalone, implementation);
             }
             // By reflection: the enum types behind these differ between Unity 6.7 and 7. A setting that cannot be applied fails the process.
-            if (!string.IsNullOrEmpty(s.req.apiCompatibility)) WritePlayerSetting("SetApiCompatibilityLevel", s.req.apiCompatibility, "apiCompatibility");
-            if (!string.IsNullOrEmpty(s.req.il2cppCodeGeneration)) WritePlayerSetting("SetIl2CppCodeGeneration", s.req.il2cppCodeGeneration, "il2cppCodeGeneration");
-            if (!string.IsNullOrEmpty(s.req.stripping)) WritePlayerSetting("SetManagedStrippingLevel", s.req.stripping, "stripping");
+            if (!string.IsNullOrEmpty(s.req.apiCompatibility)) WritePlayerSetting("SetApiCompatibilityLevel", "GetApiCompatibilityLevel", s.req.apiCompatibility, "apiCompatibility");
+            if (!string.IsNullOrEmpty(s.req.il2cppCodeGeneration)) WritePlayerSetting("SetIl2CppCodeGeneration", "GetIl2CppCodeGeneration", s.req.il2cppCodeGeneration, "il2cppCodeGeneration");
+            if (!string.IsNullOrEmpty(s.req.stripping)) WritePlayerSetting("SetManagedStrippingLevel", "GetManagedStrippingLevel", s.req.stripping, "stripping");
 
             BuildNote("build.scriptingBackend", PlayerSettings.GetScriptingBackend(NamedBuildTarget.Standalone).ToString());
             BuildNote("build.apiCompatibility", ReadPlayerSetting("GetApiCompatibilityLevel"));
@@ -77,7 +77,9 @@ namespace UnityBench.Editor
             catch { return "unavailable"; }
         }
 
-        static void WritePlayerSetting(string setter, string value, string label)
+        // The Editor may store something else than it was given (a value it maps to another one for this backend). When the value read back
+        // is a different enum value than the one asked for, the request is recorded as build.<label>Requested next to the applied value.
+        static void WritePlayerSetting(string setter, string getter, string value, string label)
         {
             var method = PlayerSettingsMethod(setter, 2);
             if (method == null) throw new NotSupportedException("build." + label + " does not exist in Unity " + Application.unityVersion + " (PlayerSettings." + setter + " not found)");
@@ -89,6 +91,12 @@ namespace UnityBench.Editor
                 throw new NotSupportedException("build." + label + " '" + value + "' is not available in Unity " + Application.unityVersion + "; valid: " + string.Join(", ", Enum.GetNames(type)));
             }
             method.Invoke(null, new object[] { NamedBuildTarget.Standalone, parsed });
+            try
+            {
+                var applied = PlayerSettingsMethod(getter, 1)?.Invoke(null, new object[] { NamedBuildTarget.Standalone });
+                if (applied != null && Convert.ToInt64(applied) != Convert.ToInt64(parsed)) BuildNote("build." + label + "Requested", value);
+            }
+            catch (Exception) { /* the applied value is still read back and recorded below */ }
         }
 
         static void BuildStep(Step step)

@@ -38,6 +38,9 @@ Fixes from two independent reviews of v0.2 and its first Windows campaign. Philo
 - Windows: cleanup no longer terminates `Unity.Licensing.Client` (and any process whose image name starts with `unity.licensing`); POSIX does the same by signalling the group member by member. What was terminated and what was kept is recorded and shown. Win32 error codes appear in `windows_process` errors.
 - A project that already embeds the Unity package gets it replaced in the copy, instead of an error. A copy that cannot be deleted because a surviving shared daemon holds it is reported (`left_behind`) and a later run reuses it once it is empty.
 
+- The Unity package declares its dependency on `com.unity.modules.jsonserialize` (the player runtime uses `JsonUtility`); a project whose manifest lists no built-in modules, such as the bundled example, did not compile before.
+- When the Editor stores a different value than the one a `[build]` key asked for, the build settings show it as `(requested ...)`.
+
 ### Packaging
 
 - `pip install .` works: the wheel carries the Unity package (`unity_bench/unity_package`); `pip install -e .` and running from a checkout use `packages/`.

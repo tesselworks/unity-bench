@@ -76,7 +76,7 @@ def _members(group):
     for line in result.stdout.splitlines():
         fields = line.split(None, 3)
         if len(fields) == 4 and fields[0].isdigit() and fields[1].isdigit() and int(fields[1]) == group:
-            members.append((int(fields[0]), os.path.basename(fields[3]), not fields[2].startswith('Z')))
+            members.append((int(fields[0]), os.path.basename(fields[3]).strip('()'), not fields[2].startswith('Z')))   # ps shows a process that is between fork and exec as (name)
     return members
 
 
