@@ -127,7 +127,8 @@ class RunnerTests(unittest.TestCase):
                        '{"schema":1,"completed":true,"samples":[{"name":"x","ms":1}],"workGroups":[1]}',
                        '{"schema":1,"completed":true,"samples":[{"name":"x","ms":1}],"headline":"x"}',
                        '{"schema":1,"completed":true,"samples":[{"name":"x","ms":1}],"environment":"x"}',
-                       '{"schema":1,"completed":true,"samples":[],"distributions":[{"name":"f","phase":"p","values":[1],"counters":{"n":NaN}}]}']
+                       '{"schema":1,"completed":true,"samples":[],"distributions":[{"name":"f","phase":"p","values":[1],"counters":{"n":NaN}}]}',
+                       '{"schema":1,"completed":true,"samples":[{"name":"x","ms":1,"info":{"v":NaN}}]}', '{"schema":1,"completed":true,"samples":[{"name":"x","ms":1}],"notes":{"v":Infinity}}']
         for bad in bad_samples:
             p.write_text(bad)
             with self.assertRaises(runner.ResultError, msg=bad):

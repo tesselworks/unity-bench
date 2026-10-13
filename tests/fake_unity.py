@@ -12,6 +12,7 @@ Behaviour is chosen by its own options, given before the Unity arguments:
   --player-fail    the built player exits 1 without writing a result
   --player-hang    the built player sleeps for a minute
   --player-error   the built player writes completed=false with an error
+  --player-bad-signal  the built player writes NaN into its first-frame signal
   --player-once    the built player ignores `rounds` and reports one sample per name (like a player adapter that runs once)
   --bad-result K   write a malformed result: null-sample, str-sample, nan-counter, bad-phase
 """
@@ -36,6 +37,7 @@ parser.add_argument('--player-fail', action='store_true')
 parser.add_argument('--player-hang', action='store_true')
 parser.add_argument('--player-error', action='store_true')
 parser.add_argument('--player-once', action='store_true')
+parser.add_argument('--player-bad-signal', action='store_true')
 parser.add_argument('--bad-result', default='')
 parser.add_argument('--as-player', action='store_true')
 ours, unity = parser.parse_known_args()
@@ -59,7 +61,8 @@ def run_player():
     env = {'unityVersion': 'fake-1', 'runtime': 'fake player runtime', 'runtimeKind': 'fake-player', 'backend': 'fake', 'development': False,
            'codeOptimization': 'Release build', 'platform': 'FakePlayer', 'graphicsDevice': 'FakeGL'}
     if arg('-unityBenchSignal'):
-        Path(arg('-unityBenchSignal')).write_text(json.dumps({'schema': 1, 'environment': env, 'frame': 2, 'realtimeSinceStartupMs': 100.0 * ours.scale}))
+        Path(arg('-unityBenchSignal')).write_text(json.dumps({'schema': 1, 'environment': env, 'frame': 2,
+                                                              'realtimeSinceStartupMs': float('nan') if ours.player_bad_signal else 100.0 * ours.scale}))
         return
     request = json.loads(Path(arg('-unityBenchArgs')).read_text())
     if ours.player_error:
@@ -81,7 +84,7 @@ def run_player():
 def write_player(output_dir):
     """A launcher that behaves like the built player: the same script, in player mode, with this process's own options."""
     options = [sys.executable, str(Path(__file__).resolve()), '--as-player', '--scale', str(ours.scale), '--salt', ours.salt, '--salt-item', ours.salt_item]
-    options += ['--fail'] * ours.player_fail + ['--hang'] * ours.player_hang + ['--player-error'] * ours.player_error + ['--player-once'] * ours.player_once
+    options += ['--fail'] * ours.player_fail + ['--hang'] * ours.player_hang + ['--player-error'] * ours.player_error + ['--player-once'] * ours.player_once + ['--player-bad-signal'] * ours.player_bad_signal
     output_dir.mkdir(parents=True, exist_ok=True)
     if os.name == 'nt':
         launcher = fake_launcher.write(output_dir, options)

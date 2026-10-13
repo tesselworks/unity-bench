@@ -14,6 +14,7 @@ import time
 
 from . import __version__, config, host_sampling, process, provenance, reload_log, workspace
 from .report import write_reports
+from .distributions import finite
 from .result import ResultError, read_result  # noqa: F401  (ResultError is part of this module's interface)
 from .summary import read_rows
 
@@ -61,8 +62,8 @@ class Campaign:
         status = 'ok' if outcome['error'] is None else 'timeout' if outcome['timed_out'] else 'failed'
         self.write({'type': 'process', **base, 'status': status, 'error': outcome['error'], 'exit_code': outcome['exit_code'],
                     'wall_ms': outcome['wall_ms'], 'environment': outcome['environment'], 'notes': outcome['notes'], 'build': outcome['build'],
-                    'headline': outcome['headline'], 'cleanup': outcome['cleanup'], 'host': sampler.summary(), 'restored_files': restored, 'started_at': datetime.datetime.fromtimestamp(started).isoformat(timespec='seconds'),
-                    'log': f'logs/{stem}.log' if log.exists() else None})
+                    'headline': outcome['headline'], 'cleanup': outcome['cleanup'], 'host': sampler.summary(), 'restored_files': restored,
+                    'started_at': datetime.datetime.fromtimestamp(started).isoformat(timespec='seconds'), 'log': f'logs/{stem}.log' if log.exists() else None})
         if status == 'ok':
             for s in outcome['samples']:
                 self.write({'type': 'sample', **base, 'name': s['name'], 'phase': s['phase'], 'ms': s['ms'], 'round': s.get('round', 0),
@@ -202,6 +203,12 @@ class Campaign:
             outcome['error'] = 'player exited without writing the first-frame signal'
             return
         reported = json.loads(signal.read_text(encoding='utf-8'))
+        try:
+            json.dumps(reported, allow_nan=False)
+            if not finite(reported['realtimeSinceStartupMs']):
+                raise ValueError
+        except (ValueError, KeyError, TypeError):
+            raise ResultError('invalid first-frame signal') from None
         phase = 'first-use' if row['repeat'] == 0 else 'warm'   # tagged: the first launch of a fresh build pays OS caches and code signing checks
         outcome['environment'] = reported.get('environment')
         # What these measure is the probe, not a presented frame (docs/workloads.md#playerstartup).

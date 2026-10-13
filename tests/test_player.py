@@ -192,6 +192,14 @@ class PlayerRunnerTests(unittest.TestCase):
         self.assertEqual(setting(rows, 'setup-build'), [])
         self.assertIn('pulled in by --only', json.loads((out / 'campaign.json').read_text())['schedule_notes'][0])
 
+    def test_a_corrupt_startup_signal_fails_that_process_and_the_schedule_continues(self):
+        path = self.campaign([{'id': 'bad', 'editor': editor('--player-bad-signal')}, {'id': 'ok', 'editor': editor()}],
+                             [{'id': 'startup', 'kind': 'player.startup', 'repeats': 2}])
+        _, rows = self.run_campaign(path)
+        status = {(r['variant'], r['status']) for r in rows if r['type'] == 'process' and r.get('role') is None}
+        self.assertEqual(status, {('bad', 'failed'), ('ok', 'ok')})
+        self.assertIn('invalid first-frame signal', next(r['error'] for r in rows if r['type'] == 'process' and r['variant'] == 'bad' and r.get('role') is None))
+
     def test_debug_and_release_variants_are_compared_within_each_pair(self):
         variants = [{'id': '6.7-debug', 'editor': editor(), 'code_optimization': 'debug'},
                     {'id': '6.7-release', 'editor': editor('--scale', '0.5'), 'code_optimization': 'release', 'baseline': '6.7-release'},

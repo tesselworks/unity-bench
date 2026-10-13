@@ -48,6 +48,10 @@ def read_result(path):
         raise ResultError('result schema must be 1')
     if data.get('completed') is not True:
         raise ResultError('adapter reported failure: ' + str(data.get('error') or 'no error text').splitlines()[0][:300])
+    try:
+        json.dumps(data, allow_nan=False)   # results.jsonl is strict JSON: a NaN hiding in notes or info would abort the run when written
+    except ValueError:
+        raise ResultError('result contains NaN or Infinity') from None
     samples, dists = data.get('samples') or [], data.get('distributions') or []
     if not isinstance(samples, list) or not isinstance(dists, list):
         raise ResultError('samples and distributions must be lists')
