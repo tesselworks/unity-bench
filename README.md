@@ -1,8 +1,8 @@
 # Unity Bench
 
-Compare the same Unity project across Editor versions or player scripting backends, with a fixed A/B schedule, fresh processes, and per-process medians. It ships built-in workloads that work on any project (open, script edit, Play Mode, player build, player startup) and a small adapter API for your own.
+Compare the same Unity project across Editor versions or player scripting backends, with a fixed A/B schedule, fresh processes, and per-process medians. It ships built-in workloads that work on any project (open, script edit, Play Mode, player build, player startup) and a small adapter API, for the Editor and for built players, for your own.
 
-It was built for a Unity 6.7 (Mono) vs Unity 7 (CoreCLR) comparison. MatterKit, a physics and fracture library, is the first consumer: its scenarios are meant to plug in as adapters (the MatterKit source is private, so that adapter lives in its own repository). License: MIT.
+It was built for a Unity 6.7 (Mono) vs Unity 7 (CoreCLR) comparison. MatterKit, a physics and fracture library, is the first consumer: its scenarios plug in as Editor and player adapters (the MatterKit source is private, so those adapters live in its own repository). License: MIT.
 
 What it does differently from a strict benchmark harness: it **annotates instead of refusing**. Host CPU and memory are recorded next to each measurement; work and output hashes are compared and flagged; first-use samples are labelled. Nothing blocks a run and nothing is deleted. See [docs/methodology.md](docs/methodology.md).
 
@@ -40,9 +40,10 @@ To measure your own project: point `[project] path` at it, list your Editors und
 | `editor.cold_open`, `editor.warm_open` | open the project with and without `Library` |
 | `editor.script_edit` | edit a leaf / widely-referenced / public-API script: compile time, compile+reload time, assemblies compiled, and the reload breakdown parsed from the Editor log |
 | `editor.play` | Enter/Exit Play Mode, with the project's settings or with domain reload disabled |
-| `editor.adapter` | your C# entry point: samples, work counters, output hash |
+| `editor.adapter` | your C# entry point: samples, per-frame distributions, work counters, output hash |
 | `player.build_time` | `BuildPipeline.BuildPlayer`, clean or incremental, per scripting backend |
 | `player.startup` | launch a built player until its first frame |
+| `player.adapter` | your C# entry point inside a built player, over many frames: samples, p50/p95/p99/max distributions with warm-up kept apart, work counters, output hash |
 
 Details and keys: [docs/workloads.md](docs/workloads.md).
 
@@ -67,13 +68,13 @@ The full report also lists first-use samples separately, per-phase reload tables
 - n is small. The report gives medians, ranges and "ranges do not overlap"; it is not a significance test, and with n = 2 or 3 non-overlap happens easily.
 - Built-in Editor workloads measure the Editor on your project, not Unity in isolation.
 - A newer Editor migrates the project on its first open; that sample is labelled first-use and excluded from the summary by default.
-- A Player-side adapter (a C# entry point inside a built player) is not implemented in v0.1. Editor adapters are.
+- Player adapters run a built player per repeat and a build per variant, so they are slow to schedule; tail percentiles of a single process are noisy, and the report shows their range across processes rather than a single number.
 - The Python runner is used from a source checkout (it injects the package from `packages/`). Windows process ownership is verified by CI mocks and native tests; the Unity workloads have been run on macOS (Apple silicon) with Unity 6000.7.0b2 and 7000.0.0a7.
 
 ## Repository layout
 
 - `src/unity_bench/` runner, process ownership (POSIX process groups, Windows Job Objects), reload-log parser, report
-- `packages/com.tesselworks.unity-bench/` Editor-only Unity package (batch entry, adapter API)
+- `packages/com.tesselworks.unity-bench/` Unity package: `Editor/` batch entry and adapter API, `Runtime/` the inert-unless-asked player side
 - `examples/` a tiny Unity project with one custom adapter and a campaign that exercises every built-in workload
 - `docs/` [methodology](docs/methodology.md), [adapters and result schema](docs/adapters.md), [workloads](docs/workloads.md), [pre-release checklist](docs/public-repository.md)
 

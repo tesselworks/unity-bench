@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using UnityEditor;
 using UnityEditor.Build;
 using UnityEditor.Build.Reporting;
@@ -42,6 +43,10 @@ namespace UnityBench.Editor
         {
             if (!Idle) return;
             Begin(step);
+            // The project's own preparation (create a scene, bake data), untimed, before the output is cleaned and the stopwatch starts.
+            if (!string.IsNullOrEmpty(s.req.prebuild))
+                try { FindStatic(s.req.prebuild, Type.EmptyTypes).Invoke(null, null); }
+                catch (TargetInvocationException e) { throw new InvalidOperationException("prebuild " + s.req.prebuild + " failed: " + e.InnerException, e.InnerException); }
             var output = s.req.outputDir;
             var location = Path.Combine(output, PlayerName + PlayerExtension());
             var clean = s.req.buildMode == "clean" || step.round == 0;
@@ -53,7 +58,7 @@ namespace UnityBench.Editor
             var timer = Stopwatch.StartNew();
             var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
             {
-                scenes = new[] { s.scenePath }, locationPathName = location, target = HostTarget(), options = options
+                scenes = s.buildScenes.ToArray(), locationPathName = location, target = HostTarget(), options = options
             });
             timer.Stop();
             if (report.summary.result != BuildResult.Succeeded)

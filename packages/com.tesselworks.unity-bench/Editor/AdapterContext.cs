@@ -39,12 +39,13 @@ namespace UnityBench.Editor
     {
         readonly Request request;
         readonly List<SampleRecord> samples;
+        readonly List<DistributionRecord> distributions;
         readonly List<Pair> notes;
         readonly Dictionary<string, int> seen = new Dictionary<string, int>();
 
-        internal AdapterContext(Request request, List<SampleRecord> samples, List<Pair> notes)
+        internal AdapterContext(Request request, List<SampleRecord> samples, List<DistributionRecord> distributions, List<Pair> notes)
         {
-            this.request = request; this.samples = samples; this.notes = notes;
+            this.request = request; this.samples = samples; this.distributions = distributions; this.notes = notes;
         }
 
         /// <summary>The <c>rounds</c> value from the campaign. The adapter decides what a round is.</summary>
@@ -79,6 +80,18 @@ namespace UnityBench.Editor
             var sample = new SampleRecord { name = name, ms = ms, round = round, phase = phase ?? (round == 0 ? "first-use" : "warm"), hash = work?.Hash ?? "" };
             if (work != null) foreach (var c in work.Counters) sample.counters.Add(new Number { k = c.Key, v = c.Value });
             samples.Add(sample);
+        }
+
+        /// <summary>
+        /// Reports many per-frame (or per-operation) times for one phase, in milliseconds. The runner stores p50, p95, p99 and max of
+        /// this process as the items "name phase p50" and so on. Use different phase names (warmup, steady) to see them apart.
+        /// </summary>
+        public void AddDistribution(string name, string phase, IEnumerable<double> values, WorkResult work = null)
+        {
+            var record = new DistributionRecord { name = name, phase = phase, hash = work?.Hash ?? "" };
+            record.values.AddRange(values);
+            if (work != null) foreach (var c in work.Counters) record.counters.Add(new Number { k = c.Key, v = c.Value });
+            distributions.Add(record);
         }
 
         /// <summary>A free-form annotation for the whole process (shown in raw results, never compared).</summary>

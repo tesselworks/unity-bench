@@ -60,11 +60,14 @@ def describe_fingerprints(values):
 
 def render(summary, campaign, rows):
     variants, base = summary['variants'], summary['baseline']
-    others = [v for v in variants if v != base]
+    bases = summary.get('baselines') or {v: base for v in variants}
+    others = [v for v in variants if bases[v] != v]
+    pairs = len({bases[v] for v in others}) > 1
     envs = environments(rows)
     configured = {v['id']: v for v in campaign.get('campaign', {}).get('variants', [])}
     lines = [f"# Unity Bench: {campaign.get('campaign', {}).get('name', 'run')}", '',
-             f"Baseline (A): `{base}`. Ratios are other / baseline, so below 1.00 means faster than the baseline. "
+             (f"Baseline (A): `{base}`. " if not pairs else 'Each variant is compared with its own baseline: ' + ', '.join(f'`{v}` with `{bases[v]}`' for v in others) + '. ')
+             + 'Ratios are other / baseline, so below 1.00 means faster than the baseline. '
              'Each cell is the median across processes of each process\'s median, then [min-max] across processes, n = processes. '
              + ('First-use samples are excluded from these tables and listed separately.' if summary['exclude_first_use'] else 'First-use samples are included.'), '',
              '## Variants', '']
@@ -73,15 +76,16 @@ def render(summary, campaign, rows):
                      configured.get(v, {}).get('backend', '?'), (envs.get(v) or {}).get('codeOptimization', '?'), f"`{configured.get(v, {}).get('editor', '?')}`"] for v in variants])
     for w in summary['workloads']:
         wl = [x for x in campaign.get('campaign', {}).get('workloads', []) if x['id'] == w['workload']]
-        extra = f" - {wl[0]['repeats']} processes x {wl[0]['rounds']} rounds" if wl and w['kind'] in ('editor.script_edit', 'editor.play', 'editor.adapter', 'player.build_time') else (f" - {wl[0]['repeats']} processes" if wl else '')
+        extra = f" - {wl[0]['repeats']} processes x {wl[0]['rounds']} rounds" if wl and w['kind'] in ('editor.script_edit', 'editor.play', 'editor.adapter', 'player.build_time', 'player.adapter') else (f" - {wl[0]['repeats']} processes" if wl else '')
         lines += ['', f"## {w['workload']} (`{w['kind']}`){extra}", '']
         if w['items']:
-            header = ['Item', *[v + (' (A)' if v == base else '') for v in w['variants']], *[f'{v}/{base}' for v in w['variants'] if v != base], 'Work']
+            compared = [v for v in w['variants'] if bases[v] != v]
+            header = ['Item', *[v + (' (A)' if v == base else '') for v in w['variants']], *[f'{v}/{bases[v]}' for v in compared], 'Work']
             body = []
             for item in w['items']:
                 work = {'identical': 'same', 'unreported': 'not reported'}.get(item['identity']['status'], '?')
                 body.append([item['name'], *[cell(item['variants'].get(v)) for v in w['variants']],
-                             *[ratio_cell(item['ratios'].get(v)) for v in w['variants'] if v != base], work])
+                             *[ratio_cell(item['ratios'].get(v)) for v in compared], work])
             lines += table(header, body)
             notes = []
             for item in w['items']:
@@ -98,28 +102,30 @@ def render(summary, campaign, rows):
         else:
             lines.append('No steady-state samples.')
         for v, agg in w['aggregate'].items():
-            lines += ['', f"`{v}` vs `{base}`: geometric mean of {agg['items']} ratios {agg['geomean']:.2f}; {agg['faster_separated']} faster and {agg['slower_separated']} slower with non-overlapping ranges."]
+            lines += ['', f"`{v}` vs `{bases[v]}`: geometric mean of {agg['items']} ratios {agg['geomean']:.2f}; {agg['faster_separated']} faster and {agg['slower_separated']} slower with non-overlapping ranges."]
         if w['differing']:
             lines += ['', f"**{len(w['differing'])} item(s) did different work or produced different output across variants or repeats. They are excluded from the table and the geometric mean above.** "
                       'Their timings are shown here for diagnosis only; a ratio between different work is not a speed comparison.', '']
-            lines += table(['Item', 'Why', 'Values', *[f'{v}/{base}' for v in w['variants'] if v != base]],
-                           [[i['name'], i['identity']['detail'], describe_fingerprints(i['identity']['values']), *[ratio_cell(i['ratios'].get(v)) for v in w['variants'] if v != base]] for i in w['differing']])
+            compared = [v for v in w['variants'] if bases[v] != v]
+            lines += table(['Item', 'Why', 'Values', *[f'{v}/{bases[v]}' for v in compared]],
+                           [[i['name'], i['identity']['detail'], describe_fingerprints(i['identity']['values']), *[ratio_cell(i['ratios'].get(v)) for v in compared]] for i in w['differing']])
         if w['first_use'] and summary['exclude_first_use']:
             lines += ['', 'First-use samples (kept in results.jsonl; one per process; ms):', '']
             lines += table(['Item', 'Variant', 'Samples'], [[f['name'], f['variant'], ', '.join(ms(x) for x in f['ms'])] for f in w['first_use']])
         for step in w['reload']:
             lines += ['', f"Reload breakdown for `{step['step']}` (ms, median across processes; log blocks attributed by step markers):", '']
             body = []
+            reload_compared = [v for v in w['variants'] if bases[v] != v]
             for phase in step['phases']:
                 cells = [c.get(phase) for c in step['cells'].values()]
                 if phase == 'compile (refresh)' and all(not c or c['median'] < 10 for c in cells):
                     continue   # a refresh that only reloads reports ~1 ms of compile; the compile happens before it
                 row = [phase, *[cell(step['cells'].get(v, {}).get(phase), count=phase.endswith('per round')) for v in w['variants']]]
-                for v in others:
-                    a, b = step['cells'].get(base, {}).get(phase), step['cells'].get(v, {}).get(phase)
+                for v in reload_compared:
+                    a, b = step['cells'].get(bases[v], {}).get(phase), step['cells'].get(v, {}).get(phase)
                     row.append(f"{b['median'] / a['median']:.2f}" if a and b and a['median'] else '-')
                 body.append(row)
-            lines += table(['Phase', *w['variants'], *[f'{v}/{base}' for v in others]], body)
+            lines += table(['Phase', *w['variants'], *[f'{v}/{bases[v]}' for v in reload_compared]], body)
     lines += ['', '## Host (annotation only)', '']
     if summary['host']:
         lines += ['Machine CPU is whole-machine utilisation while the process ran; "other" subtracts the launched process tree. Nothing was refused or discarded because of it.', '']
@@ -144,7 +150,8 @@ def write_reports(run_dir, exclude_first_use=None, include_differing=False):
     exclude = defaults.get('exclude_first_use', True) if exclude_first_use is None else exclude_first_use
     rows = read_rows(run_dir / 'results.jsonl')
     order = [v['id'] for v in campaign.get('campaign', {}).get('variants', [])]
-    summary = summarise(rows, exclude_first_use=exclude, include_differing=include_differing, baseline=defaults.get('baseline'),
+    configured = {v['id']: v.get('baseline') for v in campaign.get('campaign', {}).get('variants', [])}
+    summary = summarise(rows, exclude_first_use=exclude, include_differing=include_differing, baseline=defaults.get('baseline'), baselines=configured,
                         variant_order=[v for v in order if any(r['variant'] == v for r in rows)] or None)
     (run_dir / 'summary.json').write_text(json.dumps(summary, indent=1, allow_nan=False), encoding='utf-8')
     (run_dir / 'summary.md').write_text(render(summary, campaign, rows), encoding='utf-8')

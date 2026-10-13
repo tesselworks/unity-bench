@@ -12,8 +12,8 @@ Unity Bench compares Unity Editors and player backends on one project with a fix
 
 ## Layout
 
-- `src/unity_bench/` Python runner: `config.py` (campaign + schedule), `runner.py`, `process.py` / `windows_process.py` (owned process trees: POSIX process groups, Windows Job Objects), `host_sampling.py`, `reload_log.py`, `summary.py` (math), `report.py`, `workspace.py` (per-variant project copies), `cli.py`.
-- `packages/com.tesselworks.unity-bench/` the Unity package. Editor-only; `PlayerProbe~/` is copied into project copies for player workloads. Must compile unchanged on Unity 6.7 (Mono) and 7 (CoreCLR): lifecycle attributes `[OnCodeLoaded]`/`[OnCodeUnloading]` behind `UNITY_6000_7_OR_NEWER`, `partial` classes (UAC0031), no reliance on `JsonUtility` for nulls.
+- `src/unity_bench/` Python runner: `config.py` (campaign + schedule), `runner.py`, `process.py` / `windows_process.py` (owned process trees: POSIX process groups, Windows Job Objects), `host_sampling.py`, `reload_log.py`, `summary.py` (math), `distributions.py` (per-frame distributions to p50/p95/p99/max samples), `report.py`, `workspace.py` (per-variant project copies), `cli.py`.
+- `packages/com.tesselworks.unity-bench/` the Unity package. `Editor/` (batch entry, adapter API) is Editor-only; `Runtime/` (assembly `UnityBench.Player`: first-frame probe and the player adapter runner) is compiled into player builds and inert unless the player is started with `-unityBenchAdapter` or `-unityBenchSignal`. Must compile unchanged on Unity 6.7 (Mono) and 7 (CoreCLR): lifecycle attributes `[OnCodeLoaded]`/`[OnCodeUnloading]` behind `UNITY_6000_7_OR_NEWER`, `partial` classes (UAC0031), no reliance on `JsonUtility` for nulls.
 - `examples/minimal-unity/` tiny public-safe project with a custom adapter; `examples/minimal.toml` exercises every built-in workload.
 - `docs/` methodology, adapters (result schema), workloads, pre-release checklist.
 

@@ -17,6 +17,7 @@ def main(argv=None):
     p.add_argument('--out', help='new run directory (default: bench-runs/<name>-<timestamp>)')
     p.add_argument('--only', action='append', metavar='WORKLOAD', help='run only this workload id (repeatable)')
     p.add_argument('--keep-work', action='store_true', help='keep the per-variant project copies (large: each has a Library)')
+    p.add_argument('--work', help='where the per-variant project copies go (default: <run dir>/work); a short path avoids Windows path-length trouble')
     p = sub.add_parser('plan', help='print the fixed schedule without running anything')
     p.add_argument('campaign')
     p = sub.add_parser('report', help='regenerate summary.md and summary.json from results.jsonl')
@@ -33,13 +34,13 @@ def main(argv=None):
         if args.action == 'run':
             cfg_name = config.load(args.campaign)['name']
             out = args.out or Path('bench-runs') / f"{cfg_name}-{datetime.datetime.now():%Y%m%d-%H%M%S}"
-            out = run_campaign(args.campaign, out, keep_work=args.keep_work, only=args.only)
+            out = run_campaign(args.campaign, out, keep_work=args.keep_work, only=args.only, work=args.work)
             print((out / 'summary.md').read_text(encoding='utf-8'))
             print(f'results: {out}')
             return 0
         write_reports(args.run_dir, exclude_first_use=False if args.include_first_use else None, include_differing=args.include_differing)
         print((Path(args.run_dir) / 'summary.md').read_text(encoding='utf-8'))
         return 0
-    except (OSError, config.ConfigError, ValueError) as error:
+    except (OSError, RuntimeError, config.ConfigError, ValueError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 2

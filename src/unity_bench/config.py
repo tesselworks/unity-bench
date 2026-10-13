@@ -9,19 +9,22 @@ import re
 
 import tomllib
 
+BUILD_KEYS = {'development', 'scene', 'scenes', 'build_target', 'backend', 'prebuild'}   # what decides which player a workload gets
 KINDS = {
     'editor.cold_open': {'description': 'Delete Library, open the project in batchmode, quit.'},
     'editor.warm_open': {'description': 'Open the project in batchmode with its Library, quit.'},
     'editor.script_edit': {'description': 'Edit a script, time compile and compile+reload+idle.', 'keys': {'targets'}},
     'editor.play': {'description': 'Enter and exit Play Mode.', 'keys': {'domain_reload', 'scene'}},
     'editor.adapter': {'description': 'Run a project C# adapter inside the Editor.', 'keys': {'method', 'args'}},
-    'player.build_time': {'description': 'BuildPipeline.BuildPlayer wall time.', 'keys': {'mode', 'development', 'scene', 'build_target', 'backend'}},
-    'player.startup': {'description': 'Launch a built player until its first frame.', 'keys': {'development', 'scene', 'build_target', 'backend', 'build', 'headless', 'startup_timeout_seconds'}},
+    'player.build_time': {'description': 'BuildPipeline.BuildPlayer wall time.', 'keys': BUILD_KEYS | {'mode'}},
+    'player.startup': {'description': 'Launch a built player until its first frame.', 'keys': BUILD_KEYS | {'build', 'headless', 'window', 'player_args', 'startup_timeout_seconds'}},
+    'player.adapter': {'description': 'Run a project C# adapter inside a built player.', 'keys': BUILD_KEYS | {'build', 'method', 'args', 'headless', 'window', 'player_args'}},
 }
 COMMON_KEYS = {'id', 'kind', 'repeats', 'rounds', 'timeout_seconds', 'variants'}
-VARIANT_KEYS = {'id', 'editor', 'unity_version', 'backend', 'code_optimization', 'revision'}
+VARIANT_KEYS = {'id', 'editor', 'unity_version', 'backend', 'code_optimization', 'revision', 'baseline'}
 DEFAULT_KEYS = {'repeats', 'rounds', 'timeout_seconds', 'exclude_first_use', 'baseline', 'build_timeout_seconds'}
 TARGET_CHANGES = ('comment', 'api')
+TARGET_ROOTS = ('project', 'worktree')
 BACKENDS = ('mono', 'il2cpp', 'coreclr')
 
 
@@ -68,13 +71,16 @@ def validate(raw, base):
     unknown(raw, {'name', 'project', 'defaults', 'variants', 'workloads'}, 'campaign')
     identifier(raw.get('name'), 'name')
     project = raw.get('project') or {}
-    unknown(project, {'path', 'repository', 'inject_package'}, 'project')
+    unknown(project, {'path', 'repository', 'inject_package', 'prepare'}, 'project')
     require(isinstance(project.get('path'), str) and project['path'], 'project.path is required')
     base = Path(base)
     root = (base / project['path']).resolve()
     inject = project.get('inject_package', True)
     require(isinstance(inject, bool), 'project.inject_package must be a boolean')
     repository = (base / project['repository']).resolve() if project.get('repository') else None
+    prepare = project.get('prepare', [])
+    require(isinstance(prepare, list) and all(isinstance(c, list) and c and all(isinstance(x, str) for x in c) for c in prepare),
+            'project.prepare must be a list of commands, each a non-empty list of strings')
 
     defaults = {'repeats': 4, 'rounds': 5, 'timeout_seconds': 1800, 'build_timeout_seconds': 3600,
                 'exclude_first_use': True, 'baseline': None, **(raw.get('defaults') or {})}
@@ -101,6 +107,10 @@ def validate(raw, base):
         require(defaults['baseline'] in ids, 'defaults.baseline must name a variant')
     else:
         defaults['baseline'] = variants[0]['id']
+    for v in variants:
+        # The variant a ratio is taken against. A variant that is its own baseline gets no ratio column.
+        v['baseline'] = v.get('baseline') or defaults['baseline']
+        require(v['baseline'] in ids, f'variant {v["id"]}: baseline must name a variant')
 
     workloads, wids = [], set()
     require(isinstance(raw.get('workloads'), list) and raw['workloads'], 'At least one [[workloads]] entry is required')
@@ -111,7 +121,7 @@ def validate(raw, base):
         require(w['id'] not in wids, f'Duplicate workload {w["id"]}')
         wids.add(w['id'])
         merged = {k: defaults[k] for k in ('repeats', 'rounds', 'timeout_seconds')}
-        if w['kind'].startswith('player.build') or w['kind'] == 'player.startup':
+        if w['kind'] in ('player.build_time', 'player.startup'):
             merged['timeout_seconds'] = defaults['build_timeout_seconds']
         merged.update(w)
         for key in ('repeats', 'rounds', 'timeout_seconds'):
@@ -120,12 +130,16 @@ def validate(raw, base):
         require(isinstance(selected, list) and selected and set(selected) <= ids, f'workload {w["id"]}: variants must be a list of known variant ids')
         check_kind(merged)
         workloads.append(merged)
+    revisions = {v['id'] for v in variants if v['revision']}
     for w in workloads:
-        if w['kind'] == 'player.startup' and w.get('build'):
+        if w['kind'] in ('player.startup', 'player.adapter') and w.get('build'):
             ref = [x for x in workloads if x['id'] == w['build']]
             require(ref and ref[0]['kind'] == 'player.build_time', f'workload {w["id"]}: build must name a player.build_time workload')
             require(set(w['variants']) <= set(ref[0]['variants']), f'workload {w["id"]}: build workload must cover the same variants')
-    return {'name': raw['name'], 'project': {'path': str(root), 'repository': str(repository) if repository else None, 'inject_package': inject},
+        if w['kind'] == 'editor.script_edit' and any(t['root'] == 'worktree' for t in w['targets']):
+            require(set(w['variants']) <= revisions, f'workload {w["id"]}: targets with root = "worktree" need every selected variant to set a revision')
+    return {'name': raw['name'], 'project': {'path': str(root), 'repository': str(repository) if repository else None, 'inject_package': inject,
+                                             'prepare': prepare, 'campaign_dir': str(base.resolve())},
             'defaults': defaults, 'variants': variants, 'workloads': workloads}
 
 
@@ -136,7 +150,7 @@ def check_kind(w):
         require(isinstance(targets, list) and targets, f'workload {wid}: targets must be a non-empty list')
         seen = set()
         for t in targets:
-            unknown(t, {'id', 'path', 'change'}, f'workload {wid} target')
+            unknown(t, {'id', 'path', 'change', 'root'}, f'workload {wid} target')
             identifier(t.get('id'), 'target.id')
             require(t['id'] not in seen, f'workload {wid}: duplicate target {t["id"]}')
             seen.add(t['id'])
@@ -144,26 +158,47 @@ def check_kind(w):
                     f'workload {wid}: target path must be a project-relative .cs file')
             t.setdefault('change', 'comment')
             require(t['change'] in TARGET_CHANGES, f'workload {wid}: target change must be one of {TARGET_CHANGES}')
+            t.setdefault('root', 'project')   # 'worktree': path is relative to the variant's git worktree (for files outside the Unity project)
+            require(t['root'] in TARGET_ROOTS, f'workload {wid}: target root must be one of {TARGET_ROOTS}')
     elif kind == 'editor.play':
         w.setdefault('domain_reload', 'default')
         require(w['domain_reload'] in ('default', 'disabled'), f'workload {wid}: domain_reload must be default or disabled')
         w.setdefault('scene', None)
-    elif kind == 'editor.adapter':
+    elif kind in ('editor.adapter', 'player.adapter'):
         require(isinstance(w.get('method'), str) and re.fullmatch(r'[\w.]+\.\w+', w['method']), f'workload {wid}: method must be Namespace.Type.Method')
         args = w.setdefault('args', {})
         require(isinstance(args, dict) and all(isinstance(k, str) and isinstance(v, (str, int, float, bool)) for k, v in args.items()), f'workload {wid}: args must be a flat table')
-    elif kind in ('player.build_time', 'player.startup'):
-        w.setdefault('development', False)
-        w.setdefault('scene', None)
-        w.setdefault('build_target', None)
-        require(w.get('backend') is None or w['backend'] in BACKENDS, f'workload {wid}: backend must be one of {BACKENDS}')
-        if kind == 'player.build_time':
-            w.setdefault('mode', 'clean')
-            require(w['mode'] in ('clean', 'incremental'), f'workload {wid}: mode must be clean or incremental')
-        else:
-            w.setdefault('build', None)
-            w.setdefault('headless', True)
-            positive_int(w.setdefault('startup_timeout_seconds', 120), f'workload {wid}.startup_timeout_seconds')
+    if kind.startswith('player.'):
+        check_player(w)
+
+
+def check_player(w):
+    kind, wid = w['kind'], w['id']
+    scenes = w.get('scenes')
+    if scenes is None and w.get('scene'):
+        scenes = [w['scene']]
+    w.pop('scene', None)
+    w['scenes'] = scenes or []
+    require(isinstance(w['scenes'], list) and all(isinstance(x, str) and x.endswith('.unity') and project_relative(x) for x in w['scenes']),
+            f'workload {wid}: scenes must be a list of project-relative .unity files')
+    w.setdefault('development', False)
+    w.setdefault('build_target', None)
+    require(w.get('backend') is None or w['backend'] in BACKENDS, f'workload {wid}: backend must be one of {BACKENDS}')
+    w.setdefault('prebuild', None)
+    require(w['prebuild'] is None or isinstance(w['prebuild'], str) and re.fullmatch(r'[\w.]+\.\w+', w['prebuild']), f'workload {wid}: prebuild must be Namespace.Type.Method')
+    if kind == 'player.build_time':
+        w.setdefault('mode', 'clean')
+        require(w['mode'] in ('clean', 'incremental'), f'workload {wid}: mode must be clean or incremental')
+        return
+    w.setdefault('build', None)
+    w.setdefault('headless', kind == 'player.startup')   # an adapter usually wants real frames; startup does not
+    require(isinstance(w['headless'], bool), f'workload {wid}: headless must be a boolean')
+    w.setdefault('window', '1280x800')
+    require(isinstance(w['window'], str) and re.fullmatch(r'\d{2,5}x\d{2,5}', w['window']), f'workload {wid}: window must look like 1280x800')
+    w.setdefault('player_args', [])
+    require(isinstance(w['player_args'], list) and all(isinstance(x, str) for x in w['player_args']), f'workload {wid}: player_args must be a list of strings')
+    if kind == 'player.startup':
+        positive_int(w.setdefault('startup_timeout_seconds', 120), f'workload {wid}.startup_timeout_seconds')
 
 
 def schedule(campaign, only=None):

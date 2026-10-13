@@ -21,7 +21,8 @@ namespace UnityBench.Editor
         public string domainReload = "default", scene = "";         // editor.play
         public string method = "";                                   // editor.adapter
         public List<Pair> args = new List<Pair>();
-        public string buildMode = "clean", outputDir = "", backend = "", buildTarget = "";   // player.build_time
+        public string buildMode = "clean", outputDir = "", backend = "", buildTarget = "", prebuild = "";   // player.build_time
+        public List<string> scenes = new List<string>();
         public bool development;
     }
 
@@ -35,6 +36,14 @@ namespace UnityBench.Editor
         public List<Number> counters = new List<Number>();
     }
 
+    [Serializable]
+    class DistributionRecord
+    {
+        public string name, phase, hash;
+        public List<double> values = new List<double>();
+        public List<Number> counters = new List<Number>();
+    }
+
     [Serializable] class Step { public string name; public int round; }
 
     [Serializable]
@@ -44,6 +53,7 @@ namespace UnityBench.Editor
         public string phase = "setup";                 // setup, run, done
         public int setupStage;
         public string scenePath = "";
+        public List<string> buildScenes = new List<string>();
         public List<Step> plan = new List<Step>();
         public int cursor;
         public bool started, reloaded;
@@ -51,6 +61,7 @@ namespace UnityBench.Editor
         public int enteredFrame, assemblies;
         public string error = "";
         public List<SampleRecord> samples = new List<SampleRecord>();
+        public List<DistributionRecord> distributions = new List<DistributionRecord>();
         public List<Pair> notes = new List<Pair>();
         public List<Pair> originals = new List<Pair>();   // project-relative path -> original file text, restored on exit
         public string origPlayOptions = "";

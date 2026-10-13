@@ -35,12 +35,18 @@ For each item (a sample name inside a workload) and variant:
 
 1. Take the samples of each process and compute that process's **median**.
 2. Report the **median across processes** of those medians, with the **min-max range** across processes and the process count `n`.
-3. For each non-baseline variant report the **ratio** other / baseline of those two medians. Below 1.00 means faster than the baseline.
+3. For each variant that has a baseline other than itself, report the **ratio** variant / baseline of those two medians. Below 1.00 means faster than the baseline.
 4. Mark the pair **"no overlap"** when the ranges are separated (the slowest process of the faster variant is faster than the fastest process of the slower one), otherwise "overlap".
+
+By default every variant is compared with `defaults.baseline`. A campaign with pairs, for example Debug and Release of two Editors, gives each variant its own `baseline`: `6.7-debug` and `6.7-release` (its own baseline, so it has no ratio column) with `7-debug` compared with `6.7-debug` and `7-release` with `6.7-release`.
 
 Medians of per-process medians stop one long process from dominating, and the range shows how much repeats disagree. For workloads with many items the report also gives the geometric mean of the ratios and how many items are separated in each direction.
 
 This describes what happened in n processes. It is not a significance test. With n = 2 or 3 two ranges often fail to overlap by chance alone; read "no overlap" together with n and the range widths.
+
+## Distributions
+
+Adapters that run over many frames report them per phase. The runner reduces each phase, per process, to p50, p95, p99 and max (nearest-rank), and these become ordinary items named `<name> <phase> <stat>`, so the summary treats them like any other: median across processes, range, ratio. A tail percentile of one process is itself a noisy number; the range across processes shows it. Label the start of a run `warmup` and the rest `steady` (the adapter decides where the line is) and the first seconds, which pay JIT, caches and first-use work, are reported next to the steady state instead of inside it. See [adapters.md](adapters.md#distributions).
 
 ## Host load is an annotation
 

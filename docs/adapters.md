@@ -42,6 +42,7 @@ rounds = 5
 | `Arg(key, fallback)` | a value from the workload's `args` table, as a string |
 | `Measure(name, Func<WorkResult>)` | times the call, records one sample. The first call per `name` is `first-use`, later ones `warm` |
 | `Add(name, ms, work, phase)` | records a sample you timed yourself |
+| `AddDistribution(name, phase, values, work)` | many per-frame times for one phase; see [Distributions](#distributions) |
 | `Note(key, value)` | free-form annotation for the whole process (raw results only) |
 | `WorkResult(hash)`, `.Count(name, value)` | output hash and work counters of one sample. `WorkResult.Sha256Hex(...)` is a helper |
 
@@ -55,9 +56,74 @@ Rules for adapters:
 
 The example in `examples/minimal-unity/Assets/Editor/HashAdapter.cs` is a complete adapter.
 
-## Player adapter
+## Player adapter (`player.adapter`)
 
-A player adapter is a C# entry point inside a built player that writes the same result file. The runner side for it is **not in v0.1**. The result file below is the contract it will use; the built-in `player.startup` already launches built players with `-unityBenchSignal <path>` and reads a small signal file.
+A player adapter is a C# entry point inside a built player. The package's `Runtime/` folder (assembly `UnityBench.Player`) is compiled into the player by the project that has the package; it is inert unless the player is started with the arguments below, so a normal build of your game does not change behaviour. Reference `UnityBench.Player` from your adapter's assembly definition (a runtime assembly, not Editor-only) and write:
+
+```csharp
+using System.Collections;
+using UnityBench.Player;
+using UnityEngine.Scripting;
+
+[Preserve]                                   // keeps the type and method when IL2CPP strips the player
+public static class MyPlayerAdapter
+{
+    [Preserve]
+    public static IEnumerator Run(PlayerContext ctx)     // or: public static void Run(PlayerContext ctx)
+    {
+        var recorder = ctx.RecordFrames("frame", "warmup");
+        for (var i = 0; i < 600; i++)
+        {
+            if (i == 60) { recorder.Stop(); recorder = ctx.RecordFrames("frame", "steady"); }
+            DoOneFrameOfWork();
+            yield return null;
+        }
+        recorder.Stop();
+        ctx.Measure("hash/sha256", () => new WorkResult(Hash()).Count("bytes", 1024));
+    }
+}
+```
+
+and in the campaign:
+
+```toml
+[[workloads]]
+id = "my-frames"
+kind = "player.adapter"
+method = "MyNamespace.MyPlayerAdapter.Run"
+args = { frames = 600 }
+scenes = ["Assets/Scenes/Main.unity"]   # optional; default is a generated empty scene
+backend = "il2cpp"                       # optional; default is the variant's backend
+prebuild = "MyNamespace.MyEditor.PrepareBuild"   # optional static void(); runs in the Editor before each build, untimed
+headless = false                         # default for adapters: a window (window = "1280x800"); true = -batchmode -nographics
+player_args = ["-force-d3d11"]           # optional extra player arguments
+rounds = 3
+repeats = 5                              # fresh player processes per variant
+timeout_seconds = 1800
+```
+
+Per variant the runner builds the player once and launches `repeats` fresh processes with `-unityBenchAdapter <Type.Method> -unityBenchOut <result.json> -unityBenchArgs <request.json>`. The request file holds `workload`, `variant`, `rounds` and `args` (also accepted: a JSON object given directly after `-unityBenchArgs`). The adapter may run over many frames: an `IEnumerator` is pumped like a coroutine (yield `null`, `WaitForSeconds`, or another `IEnumerator`). When it returns, the runtime writes the result file and quits the player. An exception makes the result `completed: false` and the process a failure; a player that dies writes no result and is recorded with its exit code.
+
+Builds are shared. A build is identified, per variant, by backend, scene list, `development`, `build_target` and `prebuild`. The first `player.adapter` or `player.startup` workload that needs one builds it (recorded as a `setup-build` process, not part of any summary); later workloads with the same settings run the same build, and so does a `player.build_time` workload with those settings that ran before them. `build = "<player.build_time workload>"` picks that workload's player explicitly.
+
+`PlayerContext`:
+
+| Member | Meaning |
+| --- | --- |
+| `Rounds`, `Variant`, `Workload` | from the campaign |
+| `Arg(key, fallback)` | a value from the workload's `args` table, as a string |
+| `Measure(name, Func<WorkResult>)` | times the call, records one sample. The first call per `name` is `first-use`, later ones `warm` |
+| `Add(name, ms, work, phase)` | records a sample you timed yourself |
+| `AddDistribution(name, phase, values, work)` | many per-frame times for one phase, see below |
+| `RecordFrames(name, phase)` | records the real time between frames until `.Stop()`, then reports it as a distribution |
+| `Note(key, value)` | free-form annotation for the whole process (raw results only) |
+| `WorkResult(hash)`, `.Count(name, value)` | output hash and work counters, as for Editor adapters |
+
+An adapter that wraps a tool which runs by itself (a bench that already exists in the project) can start it with `yield return tool.Run()`, read the tool's own report afterwards and turn it into samples and distributions. The runtime keeps pumping until the adapter's enumerator ends, so a `Application.Quit` the tool calls at its end does not lose the result.
+
+### Distributions
+
+A soak or a long Play Mode run has thousands of frame times, and a median hides the stalls. An adapter reports them as one **distribution** per phase instead of one sample each (`AddDistribution` and `RecordFrames` in the player, `AddDistribution` in `AdapterContext` for Editor adapters). The runner reduces each distribution, per process, to four samples named `<name> <phase> p50`, `p95`, `p99` and `max` (nearest-rank percentiles), and the summary does the usual: median across processes of those values, range, ratio. Use different phase names for different periods, `warmup` and `steady` for example, and they appear as separate items, so a slow start is visible instead of averaged away. The raw frame times stay in the process's file under `results/`. A distribution's `hash` and `counters` are attached to all four of its items, so work that differs excludes all four.
 
 ## The result file
 
@@ -88,6 +154,9 @@ The runner passes a request file (`-unityBenchRequest`, written by the runner, r
       "info": { "reloaded": false }
     }
   ],
+  "distributions": [
+    { "name": "frame", "phase": "steady", "values": [16.4, 16.9, 17.1], "hash": null, "counters": { "frames": 3 } }
+  ],
   "notes": { }
 }
 ```
@@ -105,11 +174,12 @@ The runner passes a request file (`-unityBenchRequest`, written by the runner, r
 | `samples[].hash` | string or null | output hash; compared across variants and repeats |
 | `samples[].counters` | object of numbers | work counters; compared like the hash |
 | `samples[].info` | object | annotations (assemblies compiled, reloaded...). Never compared |
+| `distributions` | list, optional | `name`, `phase` (any label), `values` (list of numbers >= 0, in ms), optional `hash` and `counters`. Expanded to four samples as described above |
 | `notes` | object | process-level annotations |
 
 `hash` and `counters` mean *identity*: the same work should produce the same values. `info` is for anything that is allowed to differ.
 
-A result with an unknown schema, `completed: false`, no samples or an invalid sample fails the process; nothing is guessed.
+A result with an unknown schema, `completed: false`, no samples (and no distributions) or an invalid sample or distribution fails the process; nothing is guessed.
 
 ## Log markers (optional)
 
