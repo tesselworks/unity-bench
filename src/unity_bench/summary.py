@@ -67,6 +67,12 @@ def identity(samples, variants):
     return {'status': 'differs', 'detail': 'unstable within ' + ', '.join(unstable) if unstable else 'variants differ', 'values': shown}
 
 
+def pair_identity(samples, base, other):
+    """'same', 'differs' or 'not reported' for one compared pair; a variant that is unstable within itself counts as differs."""
+    status = identity([s for s in samples if s['variant'] in (base, other)], [base, other])['status']
+    return {'identical': 'same', 'unreported': 'not reported'}.get(status, 'differs')
+
+
 def summarise(rows, exclude_first_use=True, include_differing=False, baseline=None, variant_order=None, baselines=None):
     """Build the summary dict that report.py renders and summary.json stores."""
     processes = [r for r in rows if r['type'] == 'process']
@@ -94,9 +100,17 @@ def summarise(rows, exclude_first_use=True, include_differing=False, baseline=No
                 if stats:
                     per_variant[v] = stats
             ident = identity(item_samples, entry['variants'])
-            row = {'name': name, 'variants': per_variant, 'identity': ident, 'info': info_summary(steady, entry['variants']),
-                   'ratios': {v: compare(per_variant.get(base_of[v]), per_variant.get(v)) for v in entry['variants'] if base_of[v] != v}}
-            target = entry['differing'] if ident['status'] == 'differs' and not include_differing else entry['items']
+            compared = [v for v in entry['variants'] if base_of[v] != v]
+            # Work is judged per compared pair: Unity 7 IL2CPP and CoreCLR can do the same work as each other but not as 6.7.
+            pair_work = {v: pair_identity(item_samples, base_of[v], v) for v in compared}
+            ratios = {v: compare(per_variant.get(base_of[v]), per_variant.get(v)) for v in compared}
+            same_somewhere = ident['status'] != 'differs' or any(w != 'differs' for w in pair_work.values())
+            if ident['status'] == 'differs' and not include_differing:
+                ratios = {v: (r if pair_work[v] != 'differs' else None) for v, r in ratios.items()}
+            row = {'name': name, 'variants': per_variant, 'identity': ident, 'pair_work': pair_work,
+                   'info': info_summary(steady, entry['variants']), 'ratios': ratios,
+                   'diagnostic_ratios': {v: compare(per_variant.get(base_of[v]), per_variant.get(v)) for v in compared}}
+            target = entry['differing'] if not same_somewhere and not include_differing else entry['items']
             if per_variant or ident['status'] == 'differs':
                 target.append(row)
             for v in entry['variants']:
