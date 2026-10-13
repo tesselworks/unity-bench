@@ -12,6 +12,8 @@ Behaviour is chosen by its own options, given before the Unity arguments:
   --player-fail    the built player exits 1 without writing a result
   --player-hang    the built player sleeps for a minute
   --player-error   the built player writes completed=false with an error
+  --player-once    the built player ignores `rounds` and reports one sample per name (like a player adapter that runs once)
+  --bad-result K   write a malformed result: null-sample, str-sample, nan-counter, bad-phase
 """
 import argparse
 import hashlib
@@ -33,6 +35,8 @@ parser.add_argument('--hang', action='store_true')
 parser.add_argument('--player-fail', action='store_true')
 parser.add_argument('--player-hang', action='store_true')
 parser.add_argument('--player-error', action='store_true')
+parser.add_argument('--player-once', action='store_true')
+parser.add_argument('--bad-result', default='')
 parser.add_argument('--as-player', action='store_true')
 ours, unity = parser.parse_known_args()
 
@@ -52,7 +56,8 @@ def run_player():
     if ours.hang:
         time.sleep(60)
     Path(arg('-logFile')).write_text('fake player\n')
-    env = {'unityVersion': 'fake-1', 'runtime': 'fake player runtime', 'backend': 'fake', 'development': False}
+    env = {'unityVersion': 'fake-1', 'runtime': 'fake player runtime', 'runtimeKind': 'fake-player', 'backend': 'fake', 'development': False,
+           'codeOptimization': 'Release build', 'platform': 'FakePlayer', 'graphicsDevice': 'FakeGL'}
     if arg('-unityBenchSignal'):
         Path(arg('-unityBenchSignal')).write_text(json.dumps({'schema': 1, 'environment': env, 'frame': 2, 'realtimeSinceStartupMs': 100.0 * ours.scale}))
         return
@@ -64,7 +69,7 @@ def run_player():
     steady = [float(i) * ours.scale for i in range(1, 101)]
     result = {'schema': 1, 'completed': True, 'error': None, 'environment': env, 'notes': {'method': arg('-unityBenchAdapter')},
               'samples': [{'name': 'alpha', 'phase': 'first-use' if r == 0 else 'warm', 'round': r, 'ms': 10.0 * ours.scale, 'hash': digest('alpha'),
-                           'counters': {'rounds': request['rounds']}, 'info': {}} for r in range(request['rounds'])],
+                           'counters': {'rounds': request['rounds']}, 'info': {}} for r in range(1 if ours.player_once else request['rounds'])],
               'distributions': [{'name': 'frame', 'phase': 'warmup', 'values': [30.0 * ours.scale] * 3, 'hash': digest('frame' + salt), 'counters': {'frames': 3}},
                                 {'name': 'frame', 'phase': 'steady', 'values': steady, 'hash': digest('frame' + salt), 'counters': {'frames': 100}}]}
     args = {pair['k']: pair['v'] for pair in request['args']}
@@ -76,7 +81,7 @@ def run_player():
 def write_player(output_dir):
     """A launcher that behaves like the built player: the same script, in player mode, with this process's own options."""
     options = [sys.executable, str(Path(__file__).resolve()), '--as-player', '--scale', str(ours.scale), '--salt', ours.salt, '--salt-item', ours.salt_item]
-    options += ['--fail'] * ours.player_fail + ['--hang'] * ours.player_hang + ['--player-error'] * ours.player_error
+    options += ['--fail'] * ours.player_fail + ['--hang'] * ours.player_hang + ['--player-error'] * ours.player_error + ['--player-once'] * ours.player_once
     output_dir.mkdir(parents=True, exist_ok=True)
     if os.name == 'nt':
         launcher = fake_launcher.write(output_dir, options)
@@ -98,7 +103,7 @@ if ours.hang:
     time.sleep(60)
 (project / 'Library').mkdir(exist_ok=True)
 lines = ['Unity fake editor']
-env = {'unityVersion': 'fake-1', 'runtime': 'fake runtime', 'runtimeKind': 'mono', 'codeOptimization': 'Debug', 'backend': 'Mono2x'}
+env = {'unityVersion': 'fake-1', 'unityVersionFull': 'fake-1 (abc123)', 'runtime': 'fake runtime', 'runtimeKind': 'mono', 'codeOptimization': 'Debug', 'backend': 'Mono2x'}
 
 
 def block(total):
@@ -132,7 +137,15 @@ if request_path:
         notes['scenes'] = ','.join(req['scenes'])
         notes['prebuild'] = req['prebuild']
         notes['backend'] = req['backend']
-    Path(req['outPath']).write_text(json.dumps({'schema': 1, 'completed': True, 'error': None, 'environment': env, 'samples': samples, 'notes': notes}))
+        notes['build.scriptingBackend'] = req['backend']
+        notes['build.apiCompatibility'] = req.get('apiCompatibility') or 'Default'
+        notes['build.stripping'] = req.get('stripping') or 'Default'
+    result = {'schema': 1, 'completed': True, 'error': None, 'environment': env, 'samples': samples, 'notes': notes}
+    if ours.bad_result:
+        bad = {'null-sample': [None], 'str-sample': ['alpha'], 'nan-counter': [{**samples[0], 'counters': {'items': float('nan')}}],
+               'bad-phase': [{**samples[0], 'phase': 'hot'}]}[ours.bad_result] if samples else [None]
+        result['samples'] = bad
+    Path(req['outPath']).write_text(json.dumps(result))
 else:
     time.sleep(0.05 * ours.scale)
 log.write_text('\n'.join(lines) + '\n')

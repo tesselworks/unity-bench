@@ -4,6 +4,14 @@ CreateProcessW receives an owned job via PROC_THREAD_ATTRIBUTE_JOB_LIST while
 CREATE_SUSPENDED keeps user code stopped. Only owned NUL handles are inherited.
 No fallback starts an uncontained process; unsupported job/attribute APIs refuse.
 
+Shared Unity daemons survive cleanup. An Editor starts `Unity.Licensing.Client` for the whole machine; terminating it
+with the job makes the next Editor start it again and takes it away from the user's own session. Letting it break
+away from the job is not an option here, because the Editor creates it without CREATE_BREAKAWAY_FROM_JOB (and
+JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK would let every child escape). So cleanup lists the job's processes, terminates
+all but the shared daemons one by one, and clears KILL_ON_JOB_CLOSE before the job handle closes so the daemons are
+not killed with it. A job without a shared daemon, or one that cannot be listed, is still terminated atomically.
+Both lists are reported to the caller.
+
 Primary API contracts:
 https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw
 https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute
@@ -26,6 +34,10 @@ CREATE_SUSPENDED = 0x4
 EXTENDED_STARTUPINFO_PRESENT = 0x80000
 STARTF_USESTDHANDLES = 0x100
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+PROCESS_TERMINATE = 0x1
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+ERROR_MORE_DATA = 234
+SHARED_DAEMONS = ('unity.licensing',)   # lower-case image-name prefixes of processes an Editor starts for the whole machine
 PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x20002
 PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x2000D
 WAIT_OBJECT_0 = 0
@@ -79,6 +91,14 @@ class BasicAccountingInformation(ctypes.Structure):
                 'ActiveProcesses', 'TotalTerminatedProcesses')]
 
 
+class ProcessIdList(ctypes.Structure):
+    _fields_ = [('NumberOfAssignedProcesses', DWORD), ('NumberOfProcessIdsInList', DWORD), ('ProcessIdList', SIZE_T * 512)]
+
+
+def is_shared_daemon(name):
+    return name.replace('\\', '/').rsplit('/', 1)[-1].lower().startswith(SHARED_DAEMONS)
+
+
 def native_api():
     if os.name != 'nt':
         raise RuntimeError('Windows adapter ownership requires Windows')
@@ -100,6 +120,8 @@ def native_api():
             'TerminateJobObject': ([HANDLE, ctypes.c_uint32], BOOL),
             'TerminateProcess': ([HANDLE, ctypes.c_uint32], BOOL),
             'QueryInformationJobObject': ([HANDLE, ctypes.c_int32, HANDLE, DWORD, HANDLE], BOOL),
+            'OpenProcess': ([DWORD, BOOL, DWORD], HANDLE),
+            'QueryFullProcessImageNameW': ([HANDLE, DWORD, ctypes.c_wchar_p, ctypes.POINTER(DWORD)], BOOL),
             'CloseHandle': ([HANDLE], BOOL),
         }
         for name, (args, result) in declarations.items():
@@ -114,19 +136,83 @@ def native_api():
         raise RuntimeError('Windows Job Object ownership APIs are unavailable') from None
 
 
+def win32_error():
+    """The last Win32 error code of the calling thread as ' (Win32 error 5: Access is denied)', or '' when there is none."""
+    code = getattr(ctypes, 'get_last_error', lambda: 0)()
+    if not code:
+        return ''
+    text = getattr(ctypes, 'FormatError', lambda c: '')(code).strip()
+    return f' (Win32 error {code}' + (f': {text}' if text else '') + ')'
+
+
 def _check(success, message):
     if not success:
-        raise RuntimeError(message)
+        raise RuntimeError(message + win32_error())
 
 
-def _cleanup_job(api, job, process):
-    _check(api.TerminateJobObject(job, 1), 'Owned Windows job could not be terminated')
+def _job_members(api, job):
+    """[(pid, image name)] of the processes in the job, or None when it cannot be listed."""
+    ids = ProcessIdList()
+    listed = api.QueryInformationJobObject(job, 3, ctypes.byref(ids), ctypes.sizeof(ids), None)   # JobObjectBasicProcessIdList
+    if not listed and getattr(ctypes, 'get_last_error', lambda: 0)() != ERROR_MORE_DATA:
+        return None
+    members = []
+    for pid in ids.ProcessIdList[:ids.NumberOfProcessIdsInList]:
+        handle = api.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        name = ''
+        if handle:
+            buffer, size = ctypes.create_unicode_buffer(1024), DWORD(1024)
+            name = buffer.value if api.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)) else ''
+            api.CloseHandle(handle)
+        members.append((int(pid), name))
+    return members
+
+
+def _terminate_all_but_shared(api, job, members, report):
+    """Terminate the job's processes one by one, leaving shared daemons alone, until only those remain."""
+    deadline = time.monotonic() + 2
+    done = set()
+    while True:
+        victims = [(pid, name) for pid, name in members if not is_shared_daemon(name)]
+        if not victims:
+            return
+        for pid, name in victims:
+            handle = api.OpenProcess(PROCESS_TERMINATE, False, pid)
+            if handle:
+                api.TerminateProcess(handle, 1)
+                api.CloseHandle(handle)
+            if pid not in done:
+                done.add(pid)
+                report.setdefault('terminated', []).append(os.path.basename(name.replace('\\', '/')) or f'pid {pid}')
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Owned Windows job cleanup did not complete')
+        time.sleep(0.02)
+        members = _job_members(api, job)
+        if members is None:
+            raise RuntimeError('Owned Windows job cleanup could not be verified' + win32_error())
+
+
+def _cleanup_job(api, job, process, report):
+    members = _job_members(api, job)
+    names = {pid: os.path.basename(name.replace('\\', '/')) or f'pid {pid}' for pid, name in members or []}
+    kept = [pid for pid, name in members or [] if is_shared_daemon(name)]
+    report['kept'] = [names[pid] for pid in kept]
+    if kept:
+        _terminate_all_but_shared(api, job, members, report)
+        # Closing the job handle must not take the shared daemons with it.
+        _check(api.SetInformationJobObject(job, 9, ctypes.byref(ExtendedLimitInformation()), ctypes.sizeof(ExtendedLimitInformation)),
+               'Owned Windows job could not release the shared Unity daemons')
+    else:
+        _check(api.TerminateJobObject(job, 1), 'Owned Windows job could not be terminated')
+        report['terminated'] = list(names.values())
+        if members is None:
+            report['census'] = 'unavailable'
     deadline = time.monotonic() + 2
     while True:
         accounting = BasicAccountingInformation()
         _check(api.QueryInformationJobObject(job, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None),
                'Owned Windows job cleanup could not be verified')
-        if accounting.ActiveProcesses == 0:
+        if accounting.ActiveProcesses <= len(kept):
             break
         if time.monotonic() >= deadline:
             raise RuntimeError('Owned Windows job cleanup did not complete')
@@ -135,8 +221,13 @@ def _cleanup_job(api, job, process):
         raise RuntimeError('Owned Windows primary process cleanup did not complete')
 
 
-def launch_windows(argv, cwd, timeout, on_started=None, on_poll=None, on_finished=None, *, _api=None):
-    """Start only a suspended, job-contained process; discard stdout/stderr."""
+def launch_windows(argv, cwd, timeout, on_started=None, on_poll=None, on_finished=None, report=None, *, _api=None):
+    """Start only a suspended, job-contained process; discard stdout/stderr.
+
+    Returns exit code, wall milliseconds until the process exited (cleanup is not included) and PID. `report`, if
+    given, is filled with the image names `terminated` and `kept` (shared daemons) by cleanup.
+    """
+    report = {} if report is None else report
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('Adapter timeout must be finite and positive')
     if not isinstance(argv, (list, tuple)) or not argv:
@@ -218,6 +309,7 @@ def launch_windows(argv, cwd, timeout, on_started=None, on_poll=None, on_finishe
                 raise RuntimeError('Owned Windows adapter wait failed')
             if on_poll is not None:
                 on_poll()
+        elapsed = (time.perf_counter() - start) * 1000
         code = DWORD()
         _check(api.GetExitCodeProcess(info.hProcess, ctypes.byref(code)), 'Owned Windows adapter exit code is unavailable')
         return_code, pid = int(code.value), int(info.dwProcessId)
@@ -225,7 +317,7 @@ def launch_windows(argv, cwd, timeout, on_started=None, on_poll=None, on_finishe
         try:
             if info.hProcess:
                 try:
-                    _cleanup_job(api, job, info.hProcess)
+                    _cleanup_job(api, job, info.hProcess, report)
                 except BaseException:
                     # Retain the direct owned handle as a fallback even when
                     # job association/cleanup verification failed. Reap the
@@ -250,4 +342,4 @@ def launch_windows(argv, cwd, timeout, on_started=None, on_poll=None, on_finishe
                 api.CloseHandle(null_handle)
             if initialized:
                 api.DeleteProcThreadAttributeList(attributes)
-    return return_code, (time.perf_counter() - start) * 1000, pid
+    return return_code, elapsed, pid

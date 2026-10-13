@@ -10,6 +10,12 @@ repeats = 3                      # fresh Editor processes per variant per worklo
 rounds = 4                       # iterations inside one Editor process (round 0 is labelled first-use)
 baseline = "unity-6.7"           # ratios are other / baseline
 
+# Player build settings to hold equal across Editors (names as each Editor spells the enum values; omit to keep the project's own):
+# [build]
+# api_compatibility = "NET_Standard"
+# il2cpp_code_generation = "OptimizeSpeed"
+# stripping = "Minimal"
+
 [[variants]]
 id = "unity-6.7"
 editor = "/Applications/Unity/Hub/Editor/6000.7.0b2/Unity.app/Contents/MacOS/Unity"
@@ -30,11 +36,13 @@ backend = "coreclr"
 id = "cold-open"
 kind = "editor.cold_open"
 repeats = 4                      # the first open of each project copy is first-use (import, and migration on a newer Editor)
+headline = true                  # items an aggregate may include; without it a workload gets no geometric mean
 
 [[workloads]]
 id = "warm-open"
 kind = "editor.warm_open"
 repeats = 4
+headline = true
 
 [[workloads]]
 id = "script-edit"
@@ -44,6 +52,7 @@ targets = [
   { id = "core",     path = "Assets/Core/Work.cs",         change = "comment" },   # every other assembly references it
   { id = "core-api", path = "Assets/Core/Work.cs",         change = "api" },       # public API change: dependents recompile too
 ]
+headline = ["*/compile+reload"]  # item-name patterns: the edit-to-running time is the result, compile alone is a part of it
 
 [[workloads]]
 id = "play-default"

@@ -13,6 +13,8 @@ try:
 except ImportError:
     psutil = None
 
+INTERVAL_SECONDS = 1.0
+
 
 def describe():
     """Static facts about the machine, stored once per campaign."""
@@ -26,34 +28,46 @@ def describe():
 class Sampler:
     """Call `sample(pid)` periodically while a process runs, then `summary()`.
 
-    machine_cpu is whole-machine CPU percent since the previous sample. tree_cpu is the
-    launched process and its children, normalised to the same 0-100 scale, so
-    other_cpu = machine - tree is a rough measure of what everything else was doing.
+    machine_cpu is whole-machine CPU percent since the previous sample. tree_cpu is the CPU time the launched process and
+    its children used since the previous sample, on the same 0-100 scale, so other_cpu = machine - tree is only an
+    approximation of what everything else was doing: a child that starts and ends between two samples is not seen at all.
+    A child first seen mid-run is charged all of its CPU time so far, so a process that lives for one interval is not
+    counted as idle (psutil's own cpu_percent returns 0.0 on its first call for a new process). The compact series, one
+    value per interval, is kept with the summary.
     """
 
     def __init__(self):
         self.cpu, self.tree, self.memory = [], [], []
         self.load = os.getloadavg()[0] if hasattr(os, 'getloadavg') else None
-        self._procs = {}
+        self._procs, self._times = {}, {}
         self._last = time.monotonic()
         if psutil:
             psutil.cpu_percent(None)
 
     def sample(self, pid):
-        if not psutil or time.monotonic() - self._last < 1.0:
+        now = time.monotonic()
+        if not psutil or now - self._last < INTERVAL_SECONDS:
             return
-        self._last = time.monotonic()
+        elapsed, self._last = now - self._last, now
         try:
-            self.cpu.append(psutil.cpu_percent(None))
-            self.memory.append(psutil.virtual_memory().percent)
+            # Everything is read before anything is stored, so the three series stay aligned even when a lookup fails.
+            cpu, memory = psutil.cpu_percent(None), psutil.virtual_memory().percent
             root = self._procs.get(pid) or self._procs.setdefault(pid, psutil.Process(pid))
-            total = 0.0
+            used = 0.0
             for proc in [root, *root.children(recursive=True)]:
-                proc = self._procs.setdefault(proc.pid, proc)
-                total += proc.cpu_percent(None)
-            self.tree.append(min(100.0, total / (os.cpu_count() or 1)))
+                try:
+                    times = proc.cpu_times()
+                except psutil.Error:
+                    continue   # exited between listing and reading
+                total = times.user + times.system
+                used += total - self._times.get(proc.pid, 0.0)
+                self._times[proc.pid] = total
+            tree = min(100.0, 100.0 * used / elapsed / (os.cpu_count() or 1))
         except psutil.Error:
-            pass  # the process may have just exited; a missing sample is not an error
+            return  # the process may have just exited; a missing sample is not an error
+        self.cpu.append(cpu)
+        self.memory.append(memory)
+        self.tree.append(tree)
 
     def summary(self):
         if not psutil:
@@ -63,5 +77,7 @@ class Sampler:
         if self.cpu:
             out.update(machine_cpu_median=round(statistics.median(self.cpu), 1), machine_cpu_max=round(max(self.cpu), 1),
                        other_cpu_median=round(statistics.median(other), 1), other_cpu_max=round(max(other), 1),
-                       memory_percent_max=round(max(self.memory), 1))
+                       memory_percent_max=round(max(self.memory), 1),
+                       series={'interval_s': INTERVAL_SECONDS, 'machine_cpu': [round(x, 1) for x in self.cpu],
+                               'tree_cpu': [round(x, 1) for x in self.tree], 'memory_percent': [round(x, 1) for x in self.memory]})
         return out

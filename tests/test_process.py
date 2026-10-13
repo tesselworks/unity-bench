@@ -97,6 +97,49 @@ pathlib.Path(sys.argv[1]).write_text(str(child.pid))
                 PROCESS._signal_group(123, 0)
 
     @unittest.skipUnless(os.name == 'posix', 'POSIX process ownership')
+    def test_shared_unity_daemons_survive_cleanup_and_everything_else_in_the_group_does_not(self):
+        client_pid = None
+        with tempfile.TemporaryDirectory() as directory:
+            client = Path(directory) / 'Unity.Licensing.Client'
+            os.symlink(sys.executable, client)                # a process whose image name is the licensing client's
+            receipt = Path(directory) / 'pids'
+            script = '''import pathlib, subprocess, sys
+client = subprocess.Popen([sys.argv[2], '-c', 'import time; time.sleep(30)'])
+other = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+pathlib.Path(sys.argv[1]).write_text(f'{client.pid} {other.pid}')
+'''
+            report = {}
+            try:
+                code, _, _ = PROCESS.launch([sys.executable, '-c', script, str(receipt), str(client)], directory, 10, report=report)
+                client_pid, other_pid = map(int, receipt.read_text().split())
+                self.assertEqual(code, 0)
+                self.assertTrue(running(client_pid), 'the licensing client must outlive the Editor tree')
+                self.assertFalse(running(other_pid))
+                self.assertEqual(len(report['kept']), 1)
+                self.assertTrue(report['kept'][0].lower().startswith('unity.licensing'))     # `ps` truncates long names on Linux
+                self.assertEqual(len(report['terminated']), 1)                               # the other child, recorded by name
+            finally:
+                if client_pid and running(client_pid):
+                    os.kill(client_pid, signal.SIGKILL)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX process ownership')
+    def test_cleanup_report_names_what_was_terminated_and_wall_time_excludes_cleanup(self):
+        script = '''import pathlib, subprocess, sys
+subprocess.Popen([sys.executable, '-c', 'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])
+'''
+        report = {}
+        started = time.perf_counter()
+        code, elapsed_ms, _ = PROCESS.launch([sys.executable, '-c', script], '.', 10, report=report)
+        total_ms = (time.perf_counter() - started) * 1000
+        self.assertEqual(code, 0)
+        self.assertEqual((len(report['terminated']), report['kept']), (1, []))
+        self.assertGreater(total_ms - elapsed_ms, 300)       # killing a child that ignores SIGTERM takes the grace period; the measurement stopped before it
+        slow = PROCESS.run([sys.executable, '-c', 'import time; time.sleep(30)'], '.', 1)
+        self.assertTrue(slow.timed_out)
+        self.assertEqual(slow.wall_ms, 1000.0)
+        self.assertEqual(len(slow.cleanup['terminated']), 1)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX process ownership')
     def test_callbacks_observe_start_poll_and_finished_after_cleanup(self):
         calls = []
         def started(pid):

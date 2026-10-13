@@ -14,5 +14,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Require existing Python 3.11 or newer
         run: python -c 'import sys; assert sys.version_info >= (3, 11)'
+      - name: Optional dependencies (host sampling tests, wheel build test)
+        run: python -m pip install psutil setuptools
       - name: Unit tests (fake Editor, no Unity)
         run: python -I -m unittest discover -s tests

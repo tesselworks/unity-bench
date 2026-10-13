@@ -71,6 +71,17 @@ class ConfigTests(unittest.TestCase):
         ok = config.validate(base(workloads=[{'id': 'b', 'kind': 'player.build_time'}, {'id': 's', 'kind': 'player.startup', 'build': 'b'}]), '/base')
         self.assertEqual(ok['workloads'][0]['timeout_seconds'], ok['defaults']['build_timeout_seconds'])
 
+    def test_headline_and_build_settings_are_validated(self):
+        cfg = config.validate(base(build={'api_compatibility': 'NET_Standard', 'stripping': 'Minimal'},
+                                   variants=[{'id': 'a', 'editor': '/u/a'}, {'id': 'b', 'editor': '/u/b', 'build': {'api_compatibility': 'NET'}}],
+                                   workloads=[{'id': 'w', 'kind': 'editor.adapter', 'method': 'A.B.Run', 'headline': ['core/*']}]), '/base')
+        self.assertEqual([v['build'] for v in cfg['variants']], [{'api_compatibility': 'NET_Standard', 'stripping': 'Minimal'}, {'api_compatibility': 'NET', 'stripping': 'Minimal'}])
+        self.assertEqual(cfg['workloads'][0]['headline'], ['core/*'])
+        self.check(base(build={'api': 'x'}), 'unknown key')
+        self.check(base(build={'stripping': 'not valid'}), 'enum name')
+        self.check(base(workloads=[{'id': 'w', 'kind': 'editor.warm_open', 'headline': []}]), 'headline')
+        self.check(base(workloads=[{'id': 'w', 'kind': 'editor.warm_open', 'headline': False}]), 'headline')
+
 
 class ScheduleTests(unittest.TestCase):
     def test_two_variants_alternate_a_b_then_b_a(self):
@@ -80,10 +91,36 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual([r['index'] for r in rows], list(range(8)))
         self.assertEqual([r['repeat'] for r in rows], [0, 0, 1, 1, 2, 2, 3, 3])
 
-    def test_three_variants_rotate(self):
-        raw = base(variants=[{'id': x, 'editor': '/u/' + x} for x in 'abc'], workloads=[{'id': 'w', 'kind': 'editor.warm_open', 'repeats': 3}])
-        rows = config.schedule(config.validate(raw, '/base'))
-        self.assertEqual(''.join(r['variant'] for r in rows), 'abcbcacab')
+    def test_three_variants_use_each_rotation_followed_by_its_reverse(self):
+        raw = base(variants=[{'id': x, 'editor': '/u/' + x} for x in 'abc'], workloads=[{'id': 'w', 'kind': 'editor.warm_open', 'repeats': 2}])
+        notes = []
+        rows = config.schedule(config.validate(raw, '/base'), notes=notes)
+        self.assertEqual(''.join(r['variant'] for r in rows), 'abc' + 'cba')
+        self.assertEqual(notes, [])                                   # two repeats are already a balanced pair
+        raw['workloads'][0]['repeats'] = 3
+        rows = config.schedule(config.validate(raw, '/base'), notes=notes)
+        self.assertEqual(''.join(r['variant'] for r in rows), 'abc' + 'cba' + 'bca' + 'acb')   # odd repeats are raised to the next even number
+        self.assertEqual(max(r['repeat'] for r in rows), 3)
+        self.assertIn('repeats 3 -> 4', notes[0])
+
+    def test_every_compared_pair_runs_in_both_orders_equally_often(self):
+        for n in (2, 3, 4, 5, 6):
+            ids = [chr(97 + i) for i in range(n)]
+            raw = base(variants=[{'id': x, 'editor': '/u/' + x} for x in ids], workloads=[{'id': 'w', 'kind': 'editor.warm_open', 'repeats': 2 * n}])
+            rows = config.schedule(config.validate(raw, '/base'))
+            self.assertEqual(len(rows), 2 * n * n)
+            order = {}
+            for r in rows:
+                order.setdefault(r['repeat'], []).append(r['variant'])
+            before = {(x, y): 0 for x in ids for y in ids if x != y}
+            for sequence in order.values():
+                for i, x in enumerate(sequence):
+                    for y in sequence[i + 1:]:
+                        before[(x, y)] += 1
+            self.assertEqual(set(before.values()), {n}, f'n={n}')   # x before y exactly as often as y before x
+            position = {(v, i) for seq in order.values() for i, v in enumerate(seq)}
+            if n > 2:
+                self.assertEqual(len(position), n * n)               # 2n repeats also put every variant in every position
 
     def test_workload_variant_subset_and_only_filter(self):
         raw = base(workloads=[{'id': 'one', 'kind': 'editor.warm_open', 'repeats': 2, 'variants': ['b']}, {'id': 'two', 'kind': 'editor.cold_open', 'repeats': 1}])
@@ -91,6 +128,23 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual([(r['workload'], r['variant']) for r in config.schedule(cfg)], [('one', 'b'), ('one', 'b'), ('two', 'a'), ('two', 'b')])
         self.assertEqual([r['workload'] for r in config.schedule(cfg, only=['two'])], ['two', 'two'])
         self.assertEqual([r['index'] for r in config.schedule(cfg, only=['two'])], [0, 1])
+
+    def test_only_pulls_in_the_build_workloads_it_needs_for_one_repeat(self):
+        raw = base(workloads=[{'id': 'build', 'kind': 'player.build_time', 'repeats': 3}, {'id': 'other', 'kind': 'editor.warm_open'},
+                              {'id': 'start', 'kind': 'player.startup', 'build': 'build', 'repeats': 2, 'variants': ['b']}])
+        cfg = config.validate(raw, '/base')
+        notes = []
+        rows = config.schedule(cfg, only=['start'], notes=notes)
+        self.assertEqual([(r['workload'], r['variant']) for r in rows], [('build', 'b'), ('start', 'b'), ('start', 'b')])   # restricted to the variants that launch
+        self.assertIn('pulled in by --only', notes[0])
+        both = config.schedule(cfg, only=['start', 'build'])
+        self.assertEqual(sum(1 for r in both if r['workload'] == 'build'), 6)                                  # asked for explicitly: all its repeats
+        self.assertEqual([r['workload'] for r in config.schedule(cfg, only=['other'])], ['other'] * 8)
+
+    def test_a_build_workload_must_come_before_the_workloads_that_use_it(self):
+        raw = base(workloads=[{'id': 's', 'kind': 'player.startup', 'build': 'b'}, {'id': 'b', 'kind': 'player.build_time'}])
+        with self.assertRaisesRegex(config.ConfigError, 'defined before'):
+            config.validate(raw, '/base')
 
 
 if __name__ == '__main__':
