@@ -57,6 +57,8 @@ namespace UnityBench.Player
             b.Append(",\"gpu\":").Append(Quote(SystemInfo.graphicsDeviceName));
             b.Append(",\"graphicsDevice\":").Append(Quote(SystemInfo.graphicsDeviceType.ToString()));
             b.Append(",\"memoryMb\":").Append(SystemInfo.systemMemorySize);
+            b.Append(",\"vSyncCount\":").Append(QualitySettings.vSyncCount);
+            b.Append(",\"targetFrameRate\":").Append(Application.targetFrameRate);
             return b.Append('}').ToString();
         }
     }

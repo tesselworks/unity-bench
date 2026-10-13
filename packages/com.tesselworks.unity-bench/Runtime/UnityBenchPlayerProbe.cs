@@ -1,6 +1,10 @@
 // Player-side half of player.startup. Started by PlayerBoot only when the player was launched with
 //   -unityBenchSignal <path>
-// It writes <path> once the first frame has been completed, and quits.
+// The probe is created after the first scene has loaded (RuntimeInitializeOnLoadMethod AfterSceneLoad), waits for its Start and then
+// until two more frames have completed, writes <path> in that Update, and quits. It does not check that anything was presented
+// or that the scene's content is ready.
+// The runner's external clock (launch to the file's modification time) is reported as launch_to_probe; Time.realtimeSinceStartup
+// inside the player at that moment is engine_to_probe.
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -24,7 +28,7 @@ namespace UnityBench.Player
 
         void Update()
         {
-            if (Time.frameCount <= startFrame + 1) return;   // the first full frame has completed
+            if (Time.frameCount <= startFrame + 1) return;   // Start's frame and the next one have completed
             enabled = false;
             var json = "{\"schema\":1,\"environment\":" + ResultJson.Describe() + ",\"frame\":" + Time.frameCount +
                        ",\"realtimeSinceStartupMs\":" + ResultJson.Num(Time.realtimeSinceStartupAsDouble * 1000.0) + "}";

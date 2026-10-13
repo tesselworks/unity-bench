@@ -22,6 +22,7 @@ namespace UnityBench.Editor
         public string method = "";                                   // editor.adapter
         public List<Pair> args = new List<Pair>();
         public string buildMode = "clean", outputDir = "", backend = "", buildTarget = "", prebuild = "";   // player.build_time
+        public string apiCompatibility = "", il2cppCodeGeneration = "", stripping = "";             // player.build_time, "" = keep the project's setting
         public List<string> scenes = new List<string>();
         public bool development;
     }
@@ -29,7 +30,7 @@ namespace UnityBench.Editor
     [Serializable]
     class SampleRecord
     {
-        public string name, phase, hash;
+        public string name, phase, hash, workGroup;
         public double ms;
         public int round;
         public List<Pair> info = new List<Pair>();
@@ -39,11 +40,12 @@ namespace UnityBench.Editor
     [Serializable]
     class DistributionRecord
     {
-        public string name, phase, hash;
+        public string name, phase, hash, workGroup;
         public List<double> values = new List<double>();
         public List<Number> counters = new List<Number>();
     }
 
+    [Serializable] class WorkGroupRecord { public string name, hash; public List<Number> counters = new List<Number>(); }
     [Serializable] class Step { public string name; public int round; }
 
     [Serializable]
@@ -62,6 +64,8 @@ namespace UnityBench.Editor
         public string error = "";
         public List<SampleRecord> samples = new List<SampleRecord>();
         public List<DistributionRecord> distributions = new List<DistributionRecord>();
+        public List<WorkGroupRecord> workGroups = new List<WorkGroupRecord>();
+        public List<string> headline = new List<string>();
         public List<Pair> notes = new List<Pair>();
         public List<Pair> originals = new List<Pair>();   // project-relative path -> original file text, restored on exit
         public string origPlayOptions = "";

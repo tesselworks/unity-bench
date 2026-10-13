@@ -39,12 +39,15 @@ namespace UnityBench.Player
     public sealed class FrameRecorder
     {
         readonly PlayerContext context;
-        readonly string name, phase;
+        readonly string name, phase, workGroup;
         readonly List<double> values = new List<double>(4096);
         long last = -1;
         bool stopped;
 
-        internal FrameRecorder(PlayerContext context, string name, string phase) { this.context = context; this.name = name; this.phase = phase; }
+        internal FrameRecorder(PlayerContext context, string name, string phase, string workGroup)
+        {
+            this.context = context; this.name = name; this.phase = phase; this.workGroup = workGroup;
+        }
 
         public int Count => values.Count;
 
@@ -60,7 +63,7 @@ namespace UnityBench.Player
             if (stopped) return;
             stopped = true;
             context.Release(this);
-            if (values.Count > 0) context.AddDistribution(name, phase, values);
+            if (values.Count > 0) context.AddDistribution(name, phase, values, null, workGroup);
         }
     }
 
@@ -74,7 +77,7 @@ namespace UnityBench.Player
     {
         internal sealed class Sample
         {
-            public string Name, Phase, Hash;
+            public string Name, Phase, Hash, WorkGroup;
             public double Ms;
             public int Round;
             public Dictionary<string, double> Counters;
@@ -82,8 +85,14 @@ namespace UnityBench.Player
 
         internal sealed class Distribution
         {
-            public string Name, Phase, Hash;
+            public string Name, Phase, Hash, WorkGroup;
             public double[] Values;
+            public Dictionary<string, double> Counters;
+        }
+
+        internal sealed class WorkGroup
+        {
+            public string Name, Hash;
             public Dictionary<string, double> Counters;
         }
 
@@ -92,6 +101,8 @@ namespace UnityBench.Player
         readonly List<FrameRecorder> recorders = new List<FrameRecorder>();
         internal readonly List<Sample> Samples = new List<Sample>();
         internal readonly List<Distribution> Distributions = new List<Distribution>();
+        internal readonly List<WorkGroup> WorkGroups = new List<WorkGroup>();
+        internal readonly List<string> HeadlineItems = new List<string>();
         internal readonly List<KeyValuePair<string, string>> Notes = new List<KeyValuePair<string, string>>();
 
         internal PlayerContext(string workload, string variant, int rounds, Dictionary<string, string> args)
@@ -107,46 +118,72 @@ namespace UnityBench.Player
         /// <summary>A value from the workload's <c>args</c> table, or <paramref name="fallback"/>.</summary>
         public string Arg(string key, string fallback = null) => args.TryGetValue(key, out var value) ? value : fallback;
 
-        /// <summary>Times <paramref name="work"/> (the stopwatch covers only the call) and records one sample. The first call per name is first-use, later ones warm.</summary>
-        public WorkResult Measure(string name, Func<WorkResult> work)
+        /// <summary>
+        /// Times <paramref name="work"/> (the stopwatch covers only the call) and records one sample. The sample is untagged, so the runner
+        /// derives its phase: first-use for the first of a name measured more than once, warm after that, single when measured once.
+        /// </summary>
+        public WorkResult Measure(string name, Func<WorkResult> work, string workGroup = null)
         {
             var timer = Stopwatch.StartNew();
             var result = work();
             timer.Stop();
-            Add(name, timer.Elapsed.TotalMilliseconds, result);
+            Add(name, timer.Elapsed.TotalMilliseconds, result, null, workGroup);
             return result;
         }
 
-        /// <summary>Records a sample whose time you measured yourself.</summary>
-        public void Add(string name, double ms, WorkResult work = null, string phase = null)
+        /// <summary>
+        /// Records a sample whose time you measured yourself. Without a <paramref name="phase"/> the runner derives it (first-use, warm
+        /// or single, see <see cref="Measure"/>); an adapter may tag a sample "first-use", "warm", "warmup" or "steady" explicitly.
+        /// <paramref name="workGroup"/> names a group from <see cref="DefineWorkGroup"/> that derived metrics of this run inherit.
+        /// </summary>
+        public void Add(string name, double ms, WorkResult work = null, string phase = null, string workGroup = null)
         {
             seen.TryGetValue(name, out var round);
             seen[name] = round + 1;
-            Samples.Add(new Sample { Name = name, Ms = ms, Round = round, Phase = phase ?? (round == 0 ? "first-use" : "warm"), Hash = work?.Hash, Counters = work?.Counters });
+            Samples.Add(new Sample { Name = name, Ms = ms, Round = round, Phase = phase ?? "", Hash = work?.Hash, Counters = work?.Counters, WorkGroup = workGroup });
         }
 
         /// <summary>
         /// Reports many per-frame (or per-operation) times for one phase, in milliseconds. The runner stores p50, p95, p99 and max of this
         /// process as the items "name phase p50" and so on. Use different phase names (for example warmup and steady) to see them apart.
         /// </summary>
-        public void AddDistribution(string name, string phase, IEnumerable<double> values, WorkResult work = null)
+        public void AddDistribution(string name, string phase, IEnumerable<double> values, WorkResult work = null, string workGroup = null)
         {
-            Distributions.Add(new Distribution { Name = name, Phase = phase, Values = new List<double>(values).ToArray(), Hash = work?.Hash, Counters = work?.Counters });
+            Distributions.Add(new Distribution { Name = name, Phase = phase, Values = new List<double>(values).ToArray(), Hash = work?.Hash, Counters = work?.Counters, WorkGroup = workGroup });
         }
 
-        public void AddDistribution(string name, string phase, IEnumerable<float> values, WorkResult work = null)
+        public void AddDistribution(string name, string phase, IEnumerable<float> values, WorkResult work = null, string workGroup = null)
         {
             var list = new List<double>();
             foreach (var v in values) list.Add(v);
-            AddDistribution(name, phase, list, work);
+            AddDistribution(name, phase, list, work, workGroup);
         }
 
         /// <summary>Starts recording frame times; call <see cref="FrameRecorder.Stop"/> to end the phase and report it.</summary>
-        public FrameRecorder RecordFrames(string name, string phase)
+        public FrameRecorder RecordFrames(string name, string phase, string workGroup = null)
         {
-            var recorder = new FrameRecorder(this, name, phase);
+            var recorder = new FrameRecorder(this, name, phase, workGroup);
             recorders.Add(recorder);
             return recorder;
+        }
+
+        /// <summary>
+        /// Registers (or replaces) a named work identity: a hash and counters. Samples and distributions added with this
+        /// <c>workGroup</c> name share it, so metrics derived from one run inherit the run's work identity.
+        /// </summary>
+        public void DefineWorkGroup(string name, WorkResult work)
+        {
+            WorkGroups.RemoveAll(g => g.Name == name);
+            WorkGroups.Add(new WorkGroup { Name = name, Hash = work?.Hash, Counters = work == null ? null : new Dictionary<string, double>(work.Counters) });
+        }
+
+        /// <summary>
+        /// Declares the headline items of this workload as item-name patterns (shell-style <c>*</c> and <c>?</c>, matched by the runner
+        /// against final item names such as "frame steady p50").
+        /// </summary>
+        public void Headline(params string[] patterns)
+        {
+            foreach (var p in patterns) if (!string.IsNullOrEmpty(p)) HeadlineItems.Add(p);
         }
 
         /// <summary>A free-form annotation for the whole process (shown in raw results, never compared).</summary>

@@ -232,7 +232,7 @@ namespace UnityBench.Editor
 
         static void AddSample(string name, double ms, int round, params string[] info)
         {
-            var sample = new SampleRecord { name = name, ms = ms, round = round, phase = round == 0 ? "first-use" : "warm", hash = "" };
+            var sample = new SampleRecord { name = name, ms = ms, round = round, phase = "", hash = "", workGroup = "" };   // the runner derives the phase
             for (var i = 0; i + 1 < info.Length; i += 2) sample.info.Add(new Pair { k = info[i], v = info[i + 1] });
             s.samples.Add(sample);
         }
@@ -311,7 +311,7 @@ namespace UnityBench.Editor
             if (!Idle) return;
             Begin(step);
             var method = FindAdapter(s.req.method);
-            method.Invoke(null, new object[] { new AdapterContext(s.req, s.samples, s.distributions, s.notes) });
+            method.Invoke(null, new object[] { new AdapterContext(s.req, s.samples, s.distributions, s.workGroups, s.headline, s.notes) });
             End(step);
         }
 
