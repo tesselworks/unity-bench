@@ -9,6 +9,7 @@ namespace UnityBench.Example
     {
         public static void Run(AdapterContext ctx)
         {
+            ctx.Headline("xorshift", "sha256");   // the items an aggregate may include; the campaign can name more with `headline`
             var input = Work.MakeInput();
             var blocks = int.Parse(ctx.Arg("sha256_blocks", "32"), CultureInfo.InvariantCulture);
             var block = new byte[1 << 20];

@@ -69,3 +69,15 @@ def write(output_dir, command):
     shutil.copy2(launcher(), exe)
     exe.with_suffix('.args').write_text('\n'.join(command) + '\n', encoding='utf-8')
     return exe
+
+
+def compile_exe(name, source):
+    """Compile `source` (C#) to `<new temp dir>/<name>` and return its path, or None when the compiler is missing."""
+    csc = find_csc()
+    if csc is None:
+        return None
+    folder = Path(tempfile.mkdtemp(prefix='unity-bench-fake-'))
+    (folder / 'Program.cs').write_text(source, encoding='utf-8')
+    exe = folder / name
+    subprocess.run([str(csc), '/nologo', '/target:exe', f'/out:{exe}', str(folder / 'Program.cs')], check=True, capture_output=True)
+    return exe

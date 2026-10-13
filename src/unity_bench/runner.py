@@ -6,49 +6,22 @@ failed or timed-out process is recorded and the schedule continues.
 import datetime
 import hashlib
 import json
-import math
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import time
 
-from . import __version__, config, distributions, host_sampling, process, reload_log, workspace
+from . import __version__, config, host_sampling, process, provenance, reload_log, workspace
 from .report import write_reports
+from .distributions import finite
+from .result import ResultError, read_result  # noqa: F401  (ResultError is part of this module's interface)
+from .summary import read_rows
 
 BATCH_METHOD = 'UnityBench.Editor.BatchEntry.Run'
 EDITOR_ARGS = ['-batchmode', '-nographics']
 PLAYER_KINDS = ('player.startup', 'player.adapter')
 LOGGED_KINDS = ('editor.script_edit', 'editor.play', 'editor.adapter')   # kinds whose Editor.log has reload blocks to parse
-
-
-class ResultError(ValueError):
-    pass
-
-
-def read_result(path):
-    """Load and check an adapter/built-in result file (docs/adapters.md)."""
-    try:
-        data = json.loads(Path(path).read_text(encoding='utf-8'))
-    except (OSError, ValueError) as error:
-        raise ResultError(f'no readable result file ({type(error).__name__})') from None
-    if not isinstance(data, dict) or data.get('schema') != 1:
-        raise ResultError('result schema must be 1')
-    if data.get('completed') is not True:
-        raise ResultError('adapter reported failure: ' + str(data.get('error') or 'no error text').splitlines()[0][:300])
-    for s in data.get('samples') or []:
-        ms = s.get('ms') if isinstance(s, dict) else None
-        if not (isinstance(s.get('name'), str) and s['name'] and s.get('phase') in ('first-use', 'warm')
-                and isinstance(ms, (int, float)) and not isinstance(ms, bool) and math.isfinite(ms) and ms >= 0):
-            raise ResultError('invalid sample: ' + json.dumps(s)[:200])
-    dists = data.get('distributions') or []
-    for d in dists:
-        if not distributions.check(d):
-            raise ResultError('invalid distribution: ' + json.dumps(d)[:200])
-    data['samples'] = (data.get('samples') or []) + distributions.to_samples(dists)
-    if not data['samples']:
-        raise ResultError('result has no samples')
-    return data
 
 
 class Campaign:
@@ -58,6 +31,7 @@ class Campaign:
         self.workloads = {w['id']: w for w in cfg['workloads']}
         self.projects, self.worktrees = {}, {}
         self.builds = {}   # (build key, variant id) -> player executable; see build_key
+        self.build_settings = {}   # same keys -> the player build settings the Editor reported
         self.results = None
 
     def write(self, row):
@@ -74,7 +48,7 @@ class Campaign:
         saved = workspace.snapshot(project, [self.target_file(t, v) for t in w.get('targets', [])] + ['ProjectSettings/EditorSettings.asset'])
         sampler = host_sampling.Sampler()
         started = time.time()
-        outcome = {'samples': [], 'reloads': [], 'environment': None, 'notes': {}, 'error': None, 'exit_code': None, 'wall_ms': None, 'timed_out': False}
+        outcome = new_outcome()
         try:
             if w['kind'] in ('editor.cold_open', 'editor.warm_open'):
                 self.open_project(w, v, project, row, stem, sampler, outcome)
@@ -82,18 +56,18 @@ class Campaign:
                 self.player_run(w, v, project, row, stem, sampler, outcome)
             else:
                 self.batch(w, v, project, row, stem, sampler, outcome)
-        except (OSError, ResultError, RuntimeError, ValueError) as error:
+        except Exception as error:   # one bad process, result file or adapter must never stop the schedule
             outcome['error'] = outcome['error'] or f'{type(error).__name__}: {error}'
         restored = workspace.restore(project, saved)
         status = 'ok' if outcome['error'] is None else 'timeout' if outcome['timed_out'] else 'failed'
         self.write({'type': 'process', **base, 'status': status, 'error': outcome['error'], 'exit_code': outcome['exit_code'],
-                    'wall_ms': outcome['wall_ms'], 'environment': outcome['environment'], 'notes': outcome['notes'],
-                    'host': sampler.summary(), 'restored_files': restored, 'started_at': datetime.datetime.fromtimestamp(started).isoformat(timespec='seconds'),
-                    'log': f'logs/{stem}.log' if log.exists() else None})
+                    'wall_ms': outcome['wall_ms'], 'environment': outcome['environment'], 'notes': outcome['notes'], 'build': outcome['build'],
+                    'headline': outcome['headline'], 'cleanup': outcome['cleanup'], 'host': sampler.summary(), 'restored_files': restored,
+                    'started_at': datetime.datetime.fromtimestamp(started).isoformat(timespec='seconds'), 'log': f'logs/{stem}.log' if log.exists() else None})
         if status == 'ok':
             for s in outcome['samples']:
                 self.write({'type': 'sample', **base, 'name': s['name'], 'phase': s['phase'], 'ms': s['ms'], 'round': s.get('round', 0),
-                            'info': s.get('info') or {}, 'counters': s.get('counters') or None, 'hash': s.get('hash')})
+                            'info': s.get('info') or {}, 'counters': s.get('counters') or None, 'hash': s.get('hash'), 'work_group': s.get('work_group')})
             for group in outcome['reloads']:
                 self.write({'type': 'reload', **base, **group})
         return status
@@ -103,7 +77,7 @@ class Campaign:
         return [*editor, *EDITOR_ARGS, '-projectPath', str(project), '-logFile', str(log), *extra]
 
     def finish_run(self, run, outcome):
-        outcome.update(exit_code=run.exit_code, wall_ms=run.wall_ms, timed_out=run.timed_out)
+        outcome.update(exit_code=run.exit_code, wall_ms=run.wall_ms, timed_out=run.timed_out, cleanup=run.cleanup)
         if run.timed_out:
             outcome['error'] = 'timeout; process tree killed'
         elif run.exit_code != 0:
@@ -116,7 +90,7 @@ class Campaign:
         self.finish_run(run, outcome)
         if run.ok:
             # The first open of a variant's project copy also imports and, on a newer Editor, migrates it.
-            outcome['samples'].append({'name': 'open', 'ms': run.wall_ms, 'phase': 'first-use' if row['repeat'] == 0 else 'warm'})
+            outcome['samples'].append({'name': 'open', 'ms': run.wall_ms, 'phase': 'first-use' if row['repeat'] == 0 else 'warm'})   # tagged: the workload says what it measures
 
     def request(self, w, v, row, stem, output=None):
         req = {'schema': 1, 'kind': w['kind'], 'workload': w['id'], 'variant': v['id'], 'outPath': str(self.out / 'results' / f'{stem}.json'),
@@ -125,7 +99,7 @@ class Campaign:
                'targets': [{'id': t['id'], 'change': t['change'], 'path': self.target_file(t, v)} for t in w.get('targets', [])],
                'buildMode': w.get('mode', 'clean'), 'development': bool(w.get('development')), 'buildTarget': w.get('build_target') or '',
                'backend': (w.get('backend') or v['backend']) if w['kind'].startswith('player.') else '', 'scenes': w.get('scenes', []),
-               'prebuild': w.get('prebuild') or '', 'outputDir': str(self.out / 'builds' / v['id'] / (output or w['id']))}
+               'prebuild': w.get('prebuild') or '', **build_request(v), 'outputDir': str(self.out / 'builds' / v['id'] / (output or w['id']))}
         path = self.out / 'requests' / f'{stem}.json'
         path.write_text(json.dumps(req, indent=1), encoding='utf-8')
         return req, path
@@ -144,13 +118,14 @@ class Campaign:
                 outcome['error'] += f' ({error})'
             return
         data = read_result(req['outPath'])
-        outcome.update(samples=data['samples'], environment=data.get('environment'), notes=data.get('notes') or {})
+        outcome.update(samples=data['samples'], environment=data.get('environment'), notes=data.get('notes') or {}, headline=data['headline'])
         if w['kind'] in LOGGED_KINDS:
             outcome['reloads'] = [g for g in reload_log.parse_file(log) if g['step'] is not None]
         if w['kind'] == 'player.build_time' and outcome['notes'].get('playerExecutable'):
             exe = Path(outcome['notes']['playerExecutable'])
-            self.builds[(('workload', w['id']), v['id'])] = exe
-            self.builds[(build_key(w, v), v['id'])] = exe   # a campaign's other player workloads with the same build settings reuse it
+            settings = {k[len('build.'):]: x for k, x in outcome['notes'].items() if k.startswith('build.')}
+            for key in ((('workload', w['id']), v['id']), (build_key(w, v), v['id'])):   # a campaign's other player workloads with the same build settings reuse it
+                self.builds[key], self.build_settings[key] = exe, settings
 
     def target_file(self, target, v):
         """The file a script-edit target changes: project-relative, or relative to the variant's git worktree."""
@@ -168,18 +143,20 @@ class Campaign:
             # the same backend, scenes and settings run the same build.
             spec = {'id': w['id'], 'kind': 'player.build_time', 'rounds': 1, 'mode': 'clean', 'timeout_seconds': self.cfg['defaults']['build_timeout_seconds'],
                     **{k: w.get(k) for k in ('development', 'scenes', 'build_target', 'backend', 'prebuild')}}
-            setup = {'samples': [], 'reloads': [], 'environment': None, 'notes': {}, 'error': None, 'exit_code': None, 'wall_ms': None, 'timed_out': False}
+            setup = new_outcome()
             sampler = host_sampling.Sampler()
             self.batch(spec, v, project, row, stem + '-build', sampler, setup, output='auto-' + build_key_id(w, v))
             self.write({'type': 'process', 'index': row['index'], 'workload': w['id'], 'kind': w['kind'], 'variant': v['id'], 'repeat': row['repeat'],
                         'role': 'setup-build', 'status': 'ok' if setup['error'] is None else 'failed', 'error': setup['error'], 'exit_code': setup['exit_code'],
-                        'wall_ms': setup['wall_ms'], 'environment': setup['environment'], 'notes': setup['notes'], 'host': sampler.summary(), 'log': f'logs/{stem}-build.log'})
+                        'wall_ms': setup['wall_ms'], 'environment': setup['environment'], 'notes': setup['notes'], 'cleanup': setup['cleanup'], 'host': sampler.summary(),
+                        'log': f'logs/{stem}-build.log'})
             if setup['error']:
                 outcome['error'] = 'setup build failed: ' + setup['error']
                 return None
         if key not in self.builds:
             outcome['error'] = f"no player available for {v['id']}" + (f" (build workload {w['build']} did not produce one)" if w.get('build') else '')
             return None
+        outcome['build'] = self.build_settings.get(key)
         return self.builds[key]
 
     def player_argv(self, w, exe, log):
@@ -212,7 +189,7 @@ class Campaign:
             return
         if outcome['error']:
             return
-        outcome.update(samples=data['samples'], environment=data.get('environment'), notes=data.get('notes') or {})
+        outcome.update(samples=data['samples'], environment=data.get('environment'), notes=data.get('notes') or {}, headline=data['headline'])
 
     def player_startup(self, w, exe, row, stem, log, sampler, outcome):
         signal = self.out / 'signals' / f'{stem}.json'
@@ -226,12 +203,31 @@ class Campaign:
             outcome['error'] = 'player exited without writing the first-frame signal'
             return
         reported = json.loads(signal.read_text(encoding='utf-8'))
-        phase = 'first-use' if row['repeat'] == 0 else 'warm'   # the first launch of a fresh build pays OS caches and code signing checks
+        try:
+            json.dumps(reported, allow_nan=False)
+            if not finite(reported['realtimeSinceStartupMs']):
+                raise ValueError
+        except (ValueError, KeyError, TypeError):
+            raise ResultError('invalid first-frame signal') from None
+        phase = 'first-use' if row['repeat'] == 0 else 'warm'   # tagged: the first launch of a fresh build pays OS caches and code signing checks
         outcome['environment'] = reported.get('environment')
+        # What these measure is the probe, not a presented frame (docs/workloads.md#playerstartup).
         outcome['samples'] = [
-            {'name': 'first_frame', 'ms': (signal.stat().st_mtime - before) * 1000, 'phase': phase, 'info': {'frame': reported.get('frame')}},
-            {'name': 'first_frame_in_player', 'ms': reported['realtimeSinceStartupMs'], 'phase': phase},
-            {'name': 'process_total', 'ms': run.wall_ms, 'phase': phase}]
+            {'name': 'launch_to_probe', 'ms': (signal.stat().st_mtime - before) * 1000, 'phase': phase, 'info': {'frame': reported.get('frame')}},
+            {'name': 'engine_to_probe', 'ms': reported['realtimeSinceStartupMs'], 'phase': phase},
+            {'name': 'launch_to_exit', 'ms': run.wall_ms, 'phase': phase}]
+
+
+def new_outcome():
+    return {'samples': [], 'reloads': [], 'environment': None, 'notes': {}, 'build': None, 'headline': [], 'cleanup': None,
+            'error': None, 'exit_code': None, 'wall_ms': None, 'timed_out': False}
+
+
+def build_request(variant):
+    """The player build settings a campaign holds equal: request keys for the Editor side (empty = leave the project's own)."""
+    build = variant['build']
+    return {'apiCompatibility': build.get('api_compatibility') or '', 'il2cppCodeGeneration': build.get('il2cpp_code_generation') or '',
+            'stripping': build.get('stripping') or ''}
 
 
 def text_args(args):
@@ -274,7 +270,8 @@ def prepare_project(cfg, variant, root, project, out):
 
 def run_campaign(config_path, out, keep_work=False, only=None, work=None, log=print):
     cfg = config.load(config_path)
-    rows = config.schedule(cfg, only)
+    notes = []
+    rows = config.schedule(cfg, only, notes)
     out = Path(out).resolve()
     if out.exists() and any(out.iterdir()):
         raise FileExistsError(f'{out} already exists and is not empty; results are never overwritten')
@@ -283,16 +280,21 @@ def run_campaign(config_path, out, keep_work=False, only=None, work=None, log=pr
         (out / sub).mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
     campaign = Campaign(cfg, out)
-    (out / 'campaign.json').write_text(json.dumps({'tool': 'unity-bench', 'version': __version__, 'campaign': cfg, 'schedule': rows,
-                                                   'host': host_sampling.describe(), 'started_at': datetime.datetime.now().isoformat(timespec='seconds')}, indent=1), encoding='utf-8')
+    record = {'tool': 'unity-bench', 'version': __version__, 'campaign': cfg, 'schedule': rows, 'schedule_notes': notes, 'host': host_sampling.describe(),
+              'provenance': {'framework': provenance.framework(), 'variants': {}}, 'started_at': datetime.datetime.now().isoformat(timespec='seconds')}
+    write_campaign(out, record)
     campaign.results = (out / 'results.jsonl').open('a', encoding='utf-8')
     used = {r['variant'] for r in rows}
+    for note in notes:
+        log(note)
     try:
         for v in cfg['variants']:
             if v['id'] not in used:
                 continue
             log(f"preparing {v['id']}")
-            campaign.projects[v['id']], campaign.worktrees[v['id']] = workspace.create(cfg, v, work)
+            campaign.projects[v['id']], campaign.worktrees[v['id']], info = workspace.create(cfg, v, work)
+            record['provenance']['variants'][v['id']] = info
+            write_campaign(out, record)   # the resolved commits are known as soon as the copies exist
             worktree = campaign.worktrees[v['id']]
             prepare_project(cfg, v, worktree[1] if worktree else campaign.projects[v['id']], campaign.projects[v['id']], out)
         for row in rows:
@@ -303,8 +305,11 @@ def run_campaign(config_path, out, keep_work=False, only=None, work=None, log=pr
     finally:
         campaign.results.close()
         if not keep_work:
-            for vid, project in campaign.projects.items():
-                workspace.remove(project, campaign.worktrees[vid])
+            left = [path for vid, project in campaign.projects.items() if (path := workspace.remove(project, campaign.worktrees[vid]))]
+            if left:
+                record['left_behind'] = left
+                write_campaign(out, record)
+                log('could not remove (a process still has it open?): ' + ', '.join(left))
             shutil.rmtree(out / 'builds', ignore_errors=True)   # built players are binaries; --keep-work keeps them
             try:
                 work.rmdir()
@@ -312,3 +317,21 @@ def run_campaign(config_path, out, keep_work=False, only=None, work=None, log=pr
                 pass
         write_reports(out)
     return out
+
+
+def write_campaign(out, record):
+    (out / 'campaign.json').write_text(json.dumps(record, indent=1), encoding='utf-8')
+
+
+def problems(out):
+    """What a finished run lacks, one line each: processes that failed, scheduled processes that never ran, and
+    (workload, variant) pairs that produced no samples. Empty when the campaign is complete."""
+    out = Path(out)
+    rows = read_rows(out / 'results.jsonl')
+    schedule = json.loads((out / 'campaign.json').read_text(encoding='utf-8')).get('schedule', [])
+    done = {r['index']: r for r in rows if r['type'] == 'process' and r.get('role') is None}
+    sampled = {(r['workload'], r['variant']) for r in rows if r['type'] == 'sample'}
+    lines = [f"#{r['index']} {r['workload']} {r['variant']} repeat {r['repeat']}: {r['status']}: {r['error']}" for r in done.values() if r['status'] != 'ok']
+    lines += [f"#{p['index']} {p['workload']} {p['variant']} repeat {p['repeat']}: never ran" for p in schedule if p['index'] not in done]
+    lines += [f'{w} {v}: no samples' for w, v in dict.fromkeys((p['workload'], p['variant']) for p in schedule) if (w, v) not in sampled]
+    return lines

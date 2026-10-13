@@ -68,8 +68,9 @@ class PlayerRunnerTests(unittest.TestCase):
         (self.tmp / 'proj/Assets').mkdir(parents=True)
         (self.tmp / 'proj/Assets/A.cs').write_text('class A {}\n')
 
-    def campaign(self, variants, workloads, project=None, **defaults):
-        cfg = {'name': 'fake', 'project': {'path': 'proj', **(project or {})}, 'defaults': {'repeats': 2, 'rounds': 2, **defaults}, 'variants': variants, 'workloads': workloads}
+    def campaign(self, variants, workloads, project=None, build=None, **defaults):
+        cfg = {'name': 'fake', 'project': {'path': 'proj', **(project or {})}, 'defaults': {'repeats': 2, 'rounds': 2, **defaults}, 'variants': variants, 'workloads': workloads,
+               **({'build': build} if build else {})}
         path = self.tmp / 'c.json'
         path.write_text(json.dumps(cfg))
         return path
@@ -151,8 +152,53 @@ class PlayerRunnerTests(unittest.TestCase):
         _, rows = self.run_campaign(path)
         self.assertEqual(failures(rows), [])
         names = [r['name'] for r in rows if r['type'] == 'sample']
-        self.assertEqual(names.count('first_frame_in_player'), 3)
+        for name in ('launch_to_probe', 'engine_to_probe', 'launch_to_exit'):          # named for what they measure (docs/workloads.md#playerstartup)
+            self.assertEqual(names.count(name), 3)
+        self.assertNotIn('first_frame', names)
         self.assertEqual(len(setting(rows, 'setup-build')), 1)
+        phases = [r['phase'] for r in rows if r['type'] == 'sample' and r['name'] == 'launch_to_probe']
+        self.assertEqual(phases, ['first-use', 'warm', 'warm'])                         # tagged by the workload, which knows what a repeat is
+
+    def test_players_show_their_own_environment_build_settings_and_observed_rounds(self):
+        path = self.campaign([{'id': 'a', 'editor': editor(), 'backend': 'il2cpp'}, {'id': 'b', 'editor': editor('--player-once'), 'backend': 'il2cpp', 'build': {'api_compatibility': 'NET'}}],
+                             [{'id': 'pa', 'kind': 'player.adapter', 'method': 'My.A.Run', 'rounds': 3, 'repeats': 2}], build={'api_compatibility': 'NET_Standard', 'stripping': 'Minimal'})
+        out, rows = self.run_campaign(path)
+        self.assertEqual(failures(rows), [])
+        md = (out / 'summary.md').read_text()
+        self.assertIn('Players (what the built player reported, not the Editor that built it)', md)
+        players = md.split('Players (what the built player reported')[1].splitlines()
+        player_row = next(line for line in players if line.startswith('| a |'))
+        self.assertIn('Release build', player_row)                                      # the player's build kind, not the Editor's "Debug"
+        self.assertIn('FakePlayer / FakeGL', player_row)
+        self.assertIn('API level NET_Standard', player_row)                             # the campaign's setting reached the Editor request...
+        self.assertIn('stripping Minimal', player_row)
+        self.assertIn('API level NET,', next(line for line in players if line.startswith('| b |')))   # ...per variant
+        request = json.loads(next((out / 'requests').glob('*-build.json')).read_text())
+        self.assertEqual((request['apiCompatibility'], request['stripping'], request['il2cppCodeGeneration']), ('NET_Standard', 'Minimal', ''))
+        s = json.loads((out / 'summary.json').read_text())
+        w = s['workloads'][0]
+        self.assertEqual(w['observed']['samples_per_item'], [1, 3])                       # a ran 3 rounds, b's player ignores rounds
+        self.assertIn("the campaign's rounds = 3 is not what ran", md)
+        self.assertEqual(s['environments']['a']['editor'][0]['environment']['codeOptimization'], 'Debug')
+        self.assertEqual(s['environments']['a']['player'][0]['environment']['codeOptimization'], 'Release build')
+
+    def test_only_runs_the_build_workload_a_launch_needs(self):
+        path = self.campaign([{'id': 'a', 'editor': editor()}],
+                             [{'id': 'build', 'kind': 'player.build_time', 'repeats': 2, 'rounds': 1}, {'id': 'start', 'kind': 'player.startup', 'build': 'build', 'repeats': 2}])
+        out, rows = self.run_campaign(path, only=['start'])
+        self.assertEqual(failures(rows), [])
+        self.assertEqual(sum(1 for r in rows if r['type'] == 'process' and r['workload'] == 'build'), 1)   # pulled in, once
+        self.assertEqual(sum(1 for r in rows if r['type'] == 'process' and r['workload'] == 'start'), 2)
+        self.assertEqual(setting(rows, 'setup-build'), [])
+        self.assertIn('pulled in by --only', json.loads((out / 'campaign.json').read_text())['schedule_notes'][0])
+
+    def test_a_corrupt_startup_signal_fails_that_process_and_the_schedule_continues(self):
+        path = self.campaign([{'id': 'bad', 'editor': editor('--player-bad-signal')}, {'id': 'ok', 'editor': editor()}],
+                             [{'id': 'startup', 'kind': 'player.startup', 'repeats': 2}])
+        _, rows = self.run_campaign(path)
+        status = {(r['variant'], r['status']) for r in rows if r['type'] == 'process' and r.get('role') is None}
+        self.assertEqual(status, {('bad', 'failed'), ('ok', 'ok')})
+        self.assertIn('invalid first-frame signal', next(r['error'] for r in rows if r['type'] == 'process' and r['variant'] == 'bad' and r.get('role') is None))
 
     def test_debug_and_release_variants_are_compared_within_each_pair(self):
         variants = [{'id': '6.7-debug', 'editor': editor(), 'code_optimization': 'debug'},

@@ -15,19 +15,35 @@ def percentile(sorted_values, fraction):
     return sorted_values[max(0, math.ceil(fraction * len(sorted_values)) - 1)]
 
 
+def finite(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def counters_ok(counters):
+    """Work counters are a table of finite numbers (or absent); anything else is a malformed result, not a measurement."""
+    return counters is None or isinstance(counters, dict) and all(isinstance(k, str) and finite(v) for k, v in counters.items())
+
+
 def check(d):
     """True when `d` is a usable distribution entry from a result file."""
     return (isinstance(d, dict) and isinstance(d.get('name'), str) and d['name'] and isinstance(d.get('phase'), str) and d['phase']
-            and isinstance(d.get('values'), list) and d['values']
-            and all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x >= 0 for x in d['values']))
+            and isinstance(d.get('values'), list) and d['values'] and all(finite(x) and x >= 0 for x in d['values'])
+            and (d.get('hash') is None or isinstance(d['hash'], str)) and counters_ok(d.get('counters'))
+            and (d.get('workGroup') is None or isinstance(d['workGroup'], str)))
 
 
 def to_samples(entries):
-    """Four samples per distribution: p50, p95, p99 and max of its values, each carrying the distribution's hash and counters."""
+    """Four samples per distribution: p50, p95, p99 and max of its values, each carrying the distribution's identity.
+
+    The phase label stays in the item name. It is also the samples' phase when it says so (`first-use`, `warmup`, `steady`);
+    any other label is a series of many executions and counts as `warm`. `info.frames` marks a sample as coming from a distribution.
+    """
     out = []
     for d in entries:
         values = sorted(d['values'])
+        phase = d['phase'] if d['phase'] in ('first-use', 'warmup', 'steady') else 'warm'
         for stat, fraction in STATS:
-            out.append({'name': f"{d['name']} {d['phase']} {stat}", 'phase': 'warm', 'round': 0, 'ms': percentile(values, fraction),
-                        'hash': d.get('hash'), 'counters': d.get('counters') or {}, 'info': {**(d.get('info') or {}), 'frames': len(values)}})
+            out.append({'name': f"{d['name']} {d['phase']} {stat}", 'phase': phase, 'round': 0, 'ms': percentile(values, fraction),
+                        'hash': d.get('hash'), 'counters': d.get('counters') or {}, 'work_group': d.get('workGroup'),
+                        'info': {**(d.get('info') or {}), 'frames': len(values)}})
     return out

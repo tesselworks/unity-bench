@@ -4,12 +4,17 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+
+sys.path.insert(0, str(Path(__file__).parent))
+import fake_launcher  # noqa: E402
 
 PATH = Path(__file__).resolve().parents[1] / 'src/unity_bench/windows_process.py'
 SPEC = importlib.util.spec_from_file_location('bench_windows_process_tests', PATH)
@@ -27,10 +32,12 @@ def fake_api():
     api.CreateJobObjectW = Mock(return_value=201)
     def limits(job, kind, pointer, size):
         assert job == 201 and kind == 9
-        assert pointer._obj.BasicLimitInformation.LimitFlags == WINDOWS.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        events.append('limits')
+        flags = pointer._obj.BasicLimitInformation.LimitFlags
+        assert flags in (0, WINDOWS.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+        events.append('limits' if flags else 'released')
         return 1
     api.SetInformationJobObject = Mock(side_effect=limits)
+    api.members = [(123, 'C:\\Unity\\Editor\\Unity.exe')]
     def initialize(attributes, count, flags, size):
         assert count == 2
         size._obj.value = 64
@@ -81,12 +88,27 @@ def fake_api():
         events.append('terminated-job')
         return 1
     api.TerminateJobObject = Mock(side_effect=terminate_job)
-    api.TerminateProcess = Mock(return_value=1)
-    def accounting(job, kind, pointer, size, returned):
-        assert job == 201 and kind == 1
-        pointer._obj.ActiveProcesses = 0
+    def query(job, kind, pointer, size, returned):
+        assert job == 201 and kind in (1, 3)
+        if kind == 3:   # JobObjectBasicProcessIdList
+            listing = pointer._obj
+            listing.NumberOfAssignedProcesses = listing.NumberOfProcessIdsInList = len(api.members)
+            for i, (pid, _) in enumerate(api.members):
+                listing.ProcessIdList[i] = pid
+        else:           # JobObjectBasicAccountingInformation: nothing but the shared daemons is left after cleanup
+            pointer._obj.ActiveProcesses = sum(1 for _, name in api.members if WINDOWS.is_shared_daemon(name)) if 'terminated-job' not in events else 0
         return 1
-    api.QueryInformationJobObject = Mock(side_effect=accounting)
+    api.QueryInformationJobObject = Mock(side_effect=query)
+    api.OpenProcess = Mock(side_effect=lambda access, inherit, pid: 1000 + pid)
+    def image_name(handle, flags, buffer, size):
+        buffer.value = dict(api.members).get(handle - 1000, '')
+        return 1
+    api.QueryFullProcessImageNameW = Mock(side_effect=image_name)
+    def terminate_process(handle, code):
+        events.append(f'terminated-process-{handle}')
+        api.members[:] = [(pid, name) for pid, name in api.members if pid != handle - 1000]
+        return 1
+    api.TerminateProcess = Mock(side_effect=terminate_process)
     def close(handle):
         events.append('closed-' + str(handle))
         return 1
@@ -95,8 +117,8 @@ def fake_api():
 
 
 class WindowsProcessMockTests(unittest.TestCase):
-    def launch(self, api, **callbacks):
-        return WINDOWS.launch_windows([sys.executable, '-c', 'pass'], '.', 5, _api=api, **callbacks)
+    def launch(self, api, **options):
+        return WINDOWS.launch_windows([sys.executable, '-c', 'pass'], '.', 5, _api=api, **options)
 
     def test_containment_precedes_user_code_and_callbacks_finish_after_cleanup(self):
         api = fake_api()
@@ -115,7 +137,7 @@ class WindowsProcessMockTests(unittest.TestCase):
         self.assertLess(api.events.index('started'), api.events.index('resumed'))
         self.assertIn('poll', api.events)
         self.assertLess(api.events.index('finished'), api.events.index('closed-301'))
-        self.assertEqual({call.args[0] for call in api.CloseHandle.call_args_list}, {201, 202, 301, 302})
+        self.assertEqual({call.args[0] for call in api.CloseHandle.call_args_list}, {201, 202, 301, 302, 1123})   # 1123: opened to read a job member's image name
         api.DeleteProcThreadAttributeList.assert_called_once()
 
     def test_atomic_job_attribute_failure_refuses_before_process_creation(self):
@@ -185,6 +207,72 @@ class WindowsProcessMockTests(unittest.TestCase):
         self.assertIn('closed-201', api.events)
         api.TerminateProcess.assert_called_with(301, 1)
 
+    def test_shared_unity_daemons_are_left_running_and_everything_else_is_terminated(self):
+        api = fake_api()
+        api.members = [(123, r'C:\Unity\Editor\Unity.exe'), (124, r'C:\Unity\Editor\Data\Tools\AssetImportWorker.exe'),
+                       (125, r'C:\Program Files\Unity\Hub\Editor\Data\Unity.Licensing.Client.exe')]
+        report = {}
+        self.launch(api, report=report)
+        self.assertNotIn('terminated-job', api.events)                              # the atomic kill would take the licensing client too
+        self.assertIn('terminated-process-1123', api.events)
+        self.assertIn('terminated-process-1124', api.events)
+        self.assertNotIn('terminated-process-1125', api.events)
+        self.assertEqual(report, {'terminated': ['Unity.exe', 'AssetImportWorker.exe'], 'kept': ['Unity.Licensing.Client.exe']})
+        # KILL_ON_JOB_CLOSE is cleared before the job handle closes, or closing the job would kill the survivor.
+        self.assertLess(api.events.index('released'), api.events.index('closed-201'))
+        self.assertEqual(api.members, [(125, r'C:\Program Files\Unity\Hub\Editor\Data\Unity.Licensing.Client.exe')])
+
+    def test_a_job_without_shared_daemons_is_still_terminated_atomically_and_reported(self):
+        api = fake_api()
+        api.members = [(123, r'C:\Unity\Editor\Unity.exe'), (124, r'C:\Unity\bee_backend.exe')]
+        report = {}
+        self.launch(api, report=report)
+        self.assertIn('terminated-job', api.events)
+        self.assertNotIn('released', api.events)
+        self.assertEqual(report, {'kept': [], 'terminated': ['Unity.exe', 'bee_backend.exe']})
+        self.assertTrue(WINDOWS.is_shared_daemon('Unity.Licensing.Client.exe'))
+        self.assertFalse(WINDOWS.is_shared_daemon(r'C:\x\UnityHelper.exe'))
+
+    def test_a_job_that_cannot_be_listed_falls_back_to_the_atomic_kill(self):
+        api = fake_api()
+        query = api.QueryInformationJobObject.side_effect
+        api.QueryInformationJobObject.side_effect = lambda job, kind, *rest: 0 if kind == 3 else query(job, kind, *rest)
+        report = {}
+        self.launch(api, report=report)
+        self.assertIn('terminated-job', api.events)
+        self.assertEqual(report['census'], 'unavailable')
+
+    def test_wall_time_stops_before_cleanup(self):
+        api = fake_api()
+        def slow_terminate(job, code):
+            time.sleep(0.4)
+            api.events.append('terminated-job')
+            return 1
+        api.TerminateJobObject.side_effect = slow_terminate
+        started = time.perf_counter()
+        _, elapsed_ms, _ = self.launch(api)
+        self.assertGreater((time.perf_counter() - started) * 1000, 350)
+        self.assertLess(elapsed_ms, 200)
+
+    def test_failures_carry_the_win32_error_code(self):
+        api = fake_api()
+        api.CreateFileW.return_value = 0
+        with patch.object(WINDOWS.ctypes, 'get_last_error', create=True, return_value=5), \
+                patch.object(WINDOWS.ctypes, 'FormatError', create=True, return_value='Access is denied.\r\n'):
+            with self.assertRaisesRegex(RuntimeError, r'output handles are unavailable \(Win32 error 5: Access is denied\.\)'):
+                self.launch(api)
+        with patch.object(WINDOWS.ctypes, 'get_last_error', create=True, return_value=0):
+            with self.assertRaisesRegex(RuntimeError, 'output handles are unavailable$'):
+                self.launch(fake_api_with(CreateFileW=0))
+
+
+def fake_api_with(**returns):
+    api = fake_api()
+    for name, value in returns.items():
+        getattr(api, name).side_effect = None
+        getattr(api, name).return_value = value
+    return api
+
 
 @unittest.skipUnless(os.name == 'nt', 'Requires native Windows Job Object APIs')
 class WindowsProcessNativeTests(unittest.TestCase):
@@ -235,6 +323,35 @@ class WindowsProcessNativeTests(unittest.TestCase):
             code, _, _ = WINDOWS.launch_windows([sys.executable, '-c', script, str(receipt)], directory, 10)
             self.assertEqual(code, 0)
             self.assertTrue(self.process_stopped(int(receipt.read_text())))
+
+    def test_native_shared_unity_daemon_survives_while_the_rest_of_the_tree_is_terminated(self):
+        client = fake_launcher.compile_exe('Unity.Licensing.Client.exe', 'class Sleeper { static void Main() { System.Threading.Thread.Sleep(60000); } }')
+        if client is None:
+            self.skipTest('no .NET Framework compiler to build a fake licensing client')
+        client_pid = None
+        directory = tempfile.mkdtemp()    # not a context manager: the surviving client has it as its working directory until it is killed
+        try:
+            receipt = Path(directory) / 'pids'
+            script = ('import pathlib,subprocess,sys; client=subprocess.Popen([sys.argv[2]]); '
+                      'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"]); '
+                      'pathlib.Path(sys.argv[1]).write_text(f"{client.pid} {child.pid}")')
+            report = {}
+            code, _, _ = WINDOWS.launch_windows([sys.executable, '-c', script, str(receipt), str(client)], directory, 10, report=report)
+            client_pid, child_pid = map(int, receipt.read_text().split())
+            self.assertEqual(code, 0)
+            self.assertTrue(self.process_stopped(child_pid))
+            self.assertFalse(self.process_stopped(client_pid), 'the licensing client must outlive the job')
+            self.assertEqual(report['kept'], ['Unity.Licensing.Client.exe'])
+            self.assertEqual(len(report['terminated']), 1)
+        finally:
+            if client_pid:
+                subprocess.run(['taskkill', '/F', '/PID', str(client_pid)], capture_output=True)
+                self.process_stopped(client_pid)
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def test_native_failures_carry_the_win32_error_code(self):
+        with self.assertRaisesRegex(RuntimeError, r'could not be created \(Win32 error \d+'):
+            WINDOWS.launch_windows([sys.executable, '-c', 'pass'], str(Path(tempfile.gettempdir()) / 'unity-bench-no-such-directory'), 5)
 
     def test_native_observer_failure_prevents_user_code(self):
         with tempfile.TemporaryDirectory() as directory:

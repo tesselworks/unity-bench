@@ -20,8 +20,9 @@ KINDS = {
     'player.startup': {'description': 'Launch a built player until its first frame.', 'keys': BUILD_KEYS | {'build', 'headless', 'window', 'player_args', 'startup_timeout_seconds'}},
     'player.adapter': {'description': 'Run a project C# adapter inside a built player.', 'keys': BUILD_KEYS | {'build', 'method', 'args', 'headless', 'window', 'player_args'}},
 }
-COMMON_KEYS = {'id', 'kind', 'repeats', 'rounds', 'timeout_seconds', 'variants'}
-VARIANT_KEYS = {'id', 'editor', 'unity_version', 'backend', 'code_optimization', 'revision', 'baseline'}
+COMMON_KEYS = {'id', 'kind', 'repeats', 'rounds', 'timeout_seconds', 'variants', 'headline'}
+VARIANT_KEYS = {'id', 'editor', 'unity_version', 'backend', 'code_optimization', 'revision', 'baseline', 'build'}
+BUILD_SETTING_KEYS = ('api_compatibility', 'il2cpp_code_generation', 'stripping')   # player build settings a campaign may hold equal across Editors
 DEFAULT_KEYS = {'repeats', 'rounds', 'timeout_seconds', 'exclude_first_use', 'baseline', 'build_timeout_seconds'}
 TARGET_CHANGES = ('comment', 'api')
 TARGET_ROOTS = ('project', 'worktree')
@@ -68,7 +69,7 @@ def load(path):
 def validate(raw, base):
     """Return the campaign with defaults applied and paths resolved against `base`."""
     require(isinstance(raw, dict), 'Campaign must be a table')
-    unknown(raw, {'name', 'project', 'defaults', 'variants', 'workloads'}, 'campaign')
+    unknown(raw, {'name', 'project', 'defaults', 'build', 'variants', 'workloads'}, 'campaign')
     identifier(raw.get('name'), 'name')
     project = raw.get('project') or {}
     unknown(project, {'path', 'repository', 'inject_package', 'prepare'}, 'project')
@@ -89,6 +90,7 @@ def validate(raw, base):
         positive_int(defaults[key], 'defaults.' + key)
     require(isinstance(defaults['exclude_first_use'], bool), 'defaults.exclude_first_use must be a boolean')
 
+    shared_build = build_settings(raw.get('build') or {}, 'build')
     variants, ids = [], set()
     require(isinstance(raw.get('variants'), list) and raw['variants'], 'At least one [[variants]] entry is required')
     for v in raw['variants']:
@@ -102,7 +104,8 @@ def validate(raw, base):
         require(v.get('backend', 'mono') in BACKENDS, f'variant {v["id"]}: backend must be one of {BACKENDS}')
         require(v.get('code_optimization', 'default') in ('default', 'debug', 'release'), f'variant {v["id"]}: code_optimization must be default, debug or release')
         require(v.get('revision') is None or isinstance(v['revision'], str), f'variant {v["id"]}: revision must be a string')
-        variants.append({'backend': 'mono', 'code_optimization': 'default', 'unity_version': None, 'revision': None, **v})
+        variants.append({'backend': 'mono', 'code_optimization': 'default', 'unity_version': None, 'revision': None, **v,
+                         'build': {**shared_build, **build_settings(v.get('build') or {}, f'variant {v["id"]}.build')}})
     if defaults['baseline'] is not None:
         require(defaults['baseline'] in ids, 'defaults.baseline must name a variant')
     else:
@@ -126,6 +129,9 @@ def validate(raw, base):
         merged.update(w)
         for key in ('repeats', 'rounds', 'timeout_seconds'):
             positive_int(merged[key], f'workload {w["id"]}.{key}')
+        headline = merged.get('headline')
+        require(headline is None or headline is True or isinstance(headline, list) and headline and all(isinstance(x, str) and x for x in headline),
+                f'workload {w["id"]}: headline must be true (every item) or a list of item-name patterns')
         selected = merged.setdefault('variants', [v['id'] for v in variants])
         require(isinstance(selected, list) and selected and set(selected) <= ids, f'workload {w["id"]}: variants must be a list of known variant ids')
         check_kind(merged)
@@ -134,13 +140,23 @@ def validate(raw, base):
     for w in workloads:
         if w['kind'] in ('player.startup', 'player.adapter') and w.get('build'):
             ref = [x for x in workloads if x['id'] == w['build']]
-            require(ref and ref[0]['kind'] == 'player.build_time', f'workload {w["id"]}: build must name a player.build_time workload')
+            require(ref and ref[0]['kind'] == 'player.build_time' and workloads.index(ref[0]) < workloads.index(w),
+                    f'workload {w["id"]}: build must name a player.build_time workload defined before it')
             require(set(w['variants']) <= set(ref[0]['variants']), f'workload {w["id"]}: build workload must cover the same variants')
         if w['kind'] == 'editor.script_edit' and any(t['root'] == 'worktree' for t in w['targets']):
             require(set(w['variants']) <= revisions, f'workload {w["id"]}: targets with root = "worktree" need every selected variant to set a revision')
     return {'name': raw['name'], 'project': {'path': str(root), 'repository': str(repository) if repository else None, 'inject_package': inject,
                                              'prepare': prepare, 'campaign_dir': str(base.resolve())},
             'defaults': defaults, 'variants': variants, 'workloads': workloads}
+
+
+def build_settings(table, what):
+    """The optional player build settings of a campaign or variant: enum names as the Editor spells them, validated by the Editor itself."""
+    require(isinstance(table, dict), f'{what} must be a table')
+    unknown(table, BUILD_SETTING_KEYS, what)
+    for key, value in table.items():
+        require(isinstance(value, str) and re.fullmatch(r'\w+', value), f'{what}.{key} must be an enum name such as NET_Standard')
+    return dict(table)
 
 
 def check_kind(w):
@@ -201,15 +217,45 @@ def check_player(w):
         positive_int(w.setdefault('startup_timeout_seconds', 120), f'workload {wid}.startup_timeout_seconds')
 
 
-def schedule(campaign, only=None):
-    """Freeze every process before anything runs. Order rotates per repeat: A,B then B,A (then A,B ...)."""
+def variant_orders(ids):
+    """Variant orders for consecutive repeats, so every compared pair runs in both orders equally often.
+
+    Two variants alternate (A,B then B,A). More variants use each rotation followed by its reverse; a pair of
+    consecutive repeats then flips every pair, and 2n repeats also put each variant in each position equally often.
+    """
+    n = len(ids)
+    if n < 3:
+        return [ids, ids[::-1]] if n == 2 else [ids]
+    rotations = [ids[i:] + ids[:i] for i in range(n)]
+    return [order for r in rotations for order in (r, r[::-1])]
+
+
+def balanced_repeats(requested, variant_count):
+    """More than two variants need an even number of repeats to balance pair order; two alternate and keep the number asked for."""
+    return requested + requested % 2 if variant_count > 2 else requested
+
+
+def schedule(campaign, only=None, notes=None):
+    """Freeze every process before anything runs. `notes` (a list) collects what the schedule changed on purpose."""
+    workloads = {w['id']: w for w in campaign['workloads']}
+    needed = {}   # --only: the build workloads of the selected ones are pulled in (one repeat), or their launches would have no player
+    for wid in only or ():
+        w = workloads.get(wid)
+        if w and w.get('build') and w['build'] not in only:
+            needed.setdefault(w['build'], set()).update(w['variants'])
     rows = []
     for w in campaign['workloads']:
-        if only and w['id'] not in only:
+        pulled = w['id'] in needed
+        if only and w['id'] not in only and not pulled:
             continue
-        order = [v['id'] for v in campaign['variants'] if v['id'] in w['variants']]
-        for repeat in range(w['repeats']):
-            shift = repeat % len(order)
-            for variant in order[shift:] + order[:shift]:
+        order = [v['id'] for v in campaign['variants'] if v['id'] in w['variants'] and (not pulled or v['id'] in needed[w['id']])]
+        repeats = 1 if pulled else balanced_repeats(w['repeats'], len(order))
+        if notes is not None and pulled:
+            notes.append(f"{w['id']}: pulled in by --only for its player builds, 1 repeat")
+        elif notes is not None and repeats != w['repeats']:
+            notes.append(f"{w['id']}: repeats {w['repeats']} -> {repeats} so that every pair of {len(order)} variants runs in both orders equally often")
+        orders = variant_orders(order)
+        for repeat in range(repeats):
+            for variant in orders[repeat % len(orders)]:
                 rows.append({'index': len(rows), 'workload': w['id'], 'variant': variant, 'repeat': repeat})
     return rows

@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using Unity.Jobs.LowLevel.Unsafe;
@@ -22,9 +23,9 @@ namespace UnityBench.Editor
             for (var i = 0; i < s.samples.Count; i++)
             {
                 var m = s.samples[i];
-                b.Append(i > 0 ? "," : "").Append("{\"name\":").Append(Json.Quote(m.name)).Append(",\"phase\":").Append(Json.Quote(m.phase));
+                b.Append(i > 0 ? "," : "").Append("{\"name\":").Append(Json.Quote(m.name)).Append(",\"phase\":").Append(Json.OrNull(m.phase));
                 b.Append(",\"round\":").Append(m.round).Append(",\"ms\":").Append(Json.Num(m.ms));
-                b.Append(",\"hash\":").Append(Json.OrNull(m.hash));
+                b.Append(",\"hash\":").Append(Json.OrNull(m.hash)).Append(",\"workGroup\":").Append(Json.OrNull(m.workGroup));
                 b.Append(",\"counters\":{");
                 for (var c = 0; c < m.counters.Count; c++) b.Append(c > 0 ? "," : "").Append(Json.Quote(m.counters[c].k)).Append(':').Append(Json.Num(m.counters[c].v));
                 b.Append("},\"info\":").Append(Object(m.info)).Append('}');
@@ -34,12 +35,22 @@ namespace UnityBench.Editor
             {
                 var d = s.distributions[i];
                 b.Append(i > 0 ? "," : "").Append("{\"name\":").Append(Json.Quote(d.name)).Append(",\"phase\":").Append(Json.Quote(d.phase));
-                b.Append(",\"hash\":").Append(Json.OrNull(d.hash)).Append(",\"counters\":{");
+                b.Append(",\"hash\":").Append(Json.OrNull(d.hash)).Append(",\"workGroup\":").Append(Json.OrNull(d.workGroup)).Append(",\"counters\":{");
                 for (var c = 0; c < d.counters.Count; c++) b.Append(c > 0 ? "," : "").Append(Json.Quote(d.counters[c].k)).Append(':').Append(Json.Num(d.counters[c].v));
                 b.Append("},\"values\":[");
                 for (var v = 0; v < d.values.Count; v++) b.Append(v > 0 ? "," : "").Append(Json.Num(d.values[v]));
                 b.Append("]}");
             }
+            b.Append("],\"workGroups\":{");
+            for (var i = 0; i < s.workGroups.Count; i++)
+            {
+                var g = s.workGroups[i];
+                b.Append(i > 0 ? "," : "").Append(Json.Quote(g.name)).Append(":{\"hash\":").Append(Json.OrNull(g.hash)).Append(",\"counters\":{");
+                for (var c = 0; c < g.counters.Count; c++) b.Append(c > 0 ? "," : "").Append(Json.Quote(g.counters[c].k)).Append(':').Append(Json.Num(g.counters[c].v));
+                b.Append("}}");
+            }
+            b.Append("},\"headline\":[");
+            for (var i = 0; i < s.headline.Count; i++) b.Append(i > 0 ? "," : "").Append(Json.Quote(s.headline[i]));
             b.Append("],\"notes\":").Append(Object(s.notes)).Append('}');
             return b.ToString();
         }
@@ -58,11 +69,26 @@ namespace UnityBench.Editor
             return b.Append('}').ToString();
         }
 
+        // "7000.0.0a7 (abcdef123456)": the revision tells two builds of the same version apart. Internal API, so by reflection.
+        static string FullUnityVersion()
+        {
+            try
+            {
+                var full = Type.GetType("UnityEditorInternal.InternalEditorUtility, UnityEditor")
+                    ?.GetMethod("GetFullUnityVersion", BindingFlags.Public | BindingFlags.Static, null, Type.EmptyTypes, null)
+                    ?.Invoke(null, null) as string;
+                if (!string.IsNullOrEmpty(full)) return full;
+            }
+            catch { }
+            return Application.unityVersion;
+        }
+
         static string Environment(State s)
         {
             var mono = Type.GetType("Mono.Runtime") != null;
             var b = new StringBuilder("{");
             b.Append("\"unityVersion\":").Append(Json.Quote(Application.unityVersion));
+            b.Append(",\"unityVersionFull\":").Append(Json.Quote(FullUnityVersion()));
             b.Append(",\"runtime\":").Append(Json.Quote(RuntimeInformation.FrameworkDescription + " (CLR " + System.Environment.Version + ")"));
             b.Append(",\"runtimeKind\":").Append(Json.Quote(mono ? "mono" : "coreclr"));
             b.Append(",\"codeOptimization\":").Append(Json.Quote(CompilationPipeline.codeOptimization.ToString()));

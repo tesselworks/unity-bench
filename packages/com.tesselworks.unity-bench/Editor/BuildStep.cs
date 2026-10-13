@@ -28,15 +28,75 @@ namespace UnityBench.Editor
             }
         }
 
+        // Applies what the campaign asks for ("" = keep the project's setting), then records what the build will actually use.
         static void PreparePlayerSettings()
         {
             var backend = s.req.backend;
-            if (string.IsNullOrEmpty(backend)) return;
-            // Looked up by name so one source file compiles on editors that do not have every ScriptingImplementation.
-            var name = backend == "mono" ? "Mono2x" : backend == "il2cpp" ? "IL2CPP" : "CoreCLR";
-            if (!Enum.TryParse(name, true, out ScriptingImplementation implementation))
-                throw new NotSupportedException("scripting backend " + backend + " is not available in Unity " + Application.unityVersion);
-            PlayerSettings.SetScriptingBackend(NamedBuildTarget.Standalone, implementation);
+            if (!string.IsNullOrEmpty(backend))
+            {
+                // Looked up by name so one source file compiles on editors that do not have every ScriptingImplementation.
+                var name = backend == "mono" ? "Mono2x" : backend == "il2cpp" ? "IL2CPP" : "CoreCLR";
+                if (!Enum.TryParse(name, true, out ScriptingImplementation implementation))
+                    throw new NotSupportedException("scripting backend " + backend + " is not available in Unity " + Application.unityVersion);
+                PlayerSettings.SetScriptingBackend(NamedBuildTarget.Standalone, implementation);
+            }
+            // By reflection: the enum types behind these differ between Unity 6.7 and 7. A setting that cannot be applied fails the process.
+            if (!string.IsNullOrEmpty(s.req.apiCompatibility)) WritePlayerSetting("SetApiCompatibilityLevel", "GetApiCompatibilityLevel", s.req.apiCompatibility, "apiCompatibility");
+            if (!string.IsNullOrEmpty(s.req.il2cppCodeGeneration)) WritePlayerSetting("SetIl2CppCodeGeneration", "GetIl2CppCodeGeneration", s.req.il2cppCodeGeneration, "il2cppCodeGeneration");
+            if (!string.IsNullOrEmpty(s.req.stripping)) WritePlayerSetting("SetManagedStrippingLevel", "GetManagedStrippingLevel", s.req.stripping, "stripping");
+
+            BuildNote("build.scriptingBackend", PlayerSettings.GetScriptingBackend(NamedBuildTarget.Standalone).ToString());
+            BuildNote("build.apiCompatibility", ReadPlayerSetting("GetApiCompatibilityLevel"));
+            BuildNote("build.il2cppCodeGeneration", ReadPlayerSetting("GetIl2CppCodeGeneration"));
+            BuildNote("build.il2cppCompiler", ReadPlayerSetting("GetIl2CppCompilerConfiguration"));
+            BuildNote("build.stripping", ReadPlayerSetting("GetManagedStrippingLevel"));
+            BuildNote("build.development", Flag(s.req.development));
+            BuildNote("build.target", HostTarget().ToString());
+            string apis;
+            try { apis = string.Join(", ", Array.ConvertAll(PlayerSettings.GetGraphicsAPIs(HostTarget()), a => a.ToString())); }
+            catch { apis = "unavailable"; }
+            BuildNote("build.graphicsApis", apis);
+        }
+
+        static void BuildNote(string key, string value) => s.notes.Add(new Pair { k = key, v = value });
+
+        // A public static PlayerSettings method whose first parameter is the NamedBuildTarget.
+        static MethodInfo PlayerSettingsMethod(string name, int parameters)
+        {
+            foreach (var m in typeof(PlayerSettings).GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                var p = m.GetParameters();
+                if (m.Name == name && p.Length == parameters && p[0].ParameterType == typeof(NamedBuildTarget)) return m;
+            }
+            return null;
+        }
+
+        static string ReadPlayerSetting(string getter)
+        {
+            try { return PlayerSettingsMethod(getter, 1)?.Invoke(null, new object[] { NamedBuildTarget.Standalone })?.ToString() ?? "unavailable"; }
+            catch { return "unavailable"; }
+        }
+
+        // The Editor may store something else than it was given (a value it maps to another one for this backend). When the value read back
+        // is a different enum value than the one asked for, the request is recorded as build.<label>Requested next to the applied value.
+        static void WritePlayerSetting(string setter, string getter, string value, string label)
+        {
+            var method = PlayerSettingsMethod(setter, 2);
+            if (method == null) throw new NotSupportedException("build." + label + " does not exist in Unity " + Application.unityVersion + " (PlayerSettings." + setter + " not found)");
+            var type = method.GetParameters()[1].ParameterType;
+            object parsed;
+            try { parsed = Enum.Parse(type, value, true); }
+            catch (Exception)
+            {
+                throw new NotSupportedException("build." + label + " '" + value + "' is not available in Unity " + Application.unityVersion + "; valid: " + string.Join(", ", Enum.GetNames(type)));
+            }
+            method.Invoke(null, new object[] { NamedBuildTarget.Standalone, parsed });
+            try
+            {
+                var applied = PlayerSettingsMethod(getter, 1)?.Invoke(null, new object[] { NamedBuildTarget.Standalone });
+                if (applied != null && Convert.ToInt64(applied) != Convert.ToInt64(parsed)) BuildNote("build." + label + "Requested", value);
+            }
+            catch (Exception) { /* the applied value is still read back and recorded below */ }
         }
 
         static void BuildStep(Step step)

@@ -130,9 +130,9 @@ namespace UnityBench.Player
             for (var i = 0; i < samples.Count; i++)
             {
                 var s = samples[i];
-                b.Append(i > 0 ? "," : "").Append("{\"name\":").Append(ResultJson.Quote(s.Name)).Append(",\"phase\":").Append(ResultJson.Quote(s.Phase));
+                b.Append(i > 0 ? "," : "").Append("{\"name\":").Append(ResultJson.Quote(s.Name)).Append(",\"phase\":").Append(ResultJson.OrNull(s.Phase));
                 b.Append(",\"round\":").Append(s.Round).Append(",\"ms\":").Append(ResultJson.Num(s.Ms));
-                b.Append(",\"hash\":").Append(ResultJson.OrNull(s.Hash)).Append(",\"counters\":").Append(Counters(s.Counters)).Append('}');
+                b.Append(",\"hash\":").Append(ResultJson.OrNull(s.Hash)).Append(",\"workGroup\":").Append(ResultJson.OrNull(s.WorkGroup)).Append(",\"counters\":").Append(Counters(s.Counters)).Append('}');
             }
             b.Append("],\"distributions\":[");
             var distributions = context?.Distributions ?? new List<PlayerContext.Distribution>();
@@ -140,10 +140,18 @@ namespace UnityBench.Player
             {
                 var d = distributions[i];
                 b.Append(i > 0 ? "," : "").Append("{\"name\":").Append(ResultJson.Quote(d.Name)).Append(",\"phase\":").Append(ResultJson.Quote(d.Phase));
-                b.Append(",\"hash\":").Append(ResultJson.OrNull(d.Hash)).Append(",\"counters\":").Append(Counters(d.Counters)).Append(",\"values\":[");
+                b.Append(",\"hash\":").Append(ResultJson.OrNull(d.Hash)).Append(",\"workGroup\":").Append(ResultJson.OrNull(d.WorkGroup)).Append(",\"counters\":").Append(Counters(d.Counters)).Append(",\"values\":[");
                 for (var v = 0; v < d.Values.Length; v++) b.Append(v > 0 ? "," : "").Append(ResultJson.Num(d.Values[v]));
                 b.Append("]}");
             }
+            b.Append("],\"workGroups\":{");
+            var groups = context?.WorkGroups ?? new List<PlayerContext.WorkGroup>();
+            for (var i = 0; i < groups.Count; i++)
+                b.Append(i > 0 ? "," : "").Append(ResultJson.Quote(groups[i].Name)).Append(":{\"hash\":").Append(ResultJson.OrNull(groups[i].Hash))
+                    .Append(",\"counters\":").Append(Counters(groups[i].Counters)).Append('}');
+            b.Append("},\"headline\":[");
+            var headline = context?.HeadlineItems ?? new List<string>();
+            for (var i = 0; i < headline.Count; i++) b.Append(i > 0 ? "," : "").Append(ResultJson.Quote(headline[i]));
             b.Append("],\"notes\":{");
             var notes = context?.Notes ?? new List<KeyValuePair<string, string>>();
             for (var i = 0; i < notes.Count; i++) b.Append(i > 0 ? "," : "").Append(ResultJson.Quote(notes[i].Key)).Append(':').Append(ResultJson.Quote(notes[i].Value));

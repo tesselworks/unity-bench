@@ -17,6 +17,7 @@ namespace UnityBench.Example
             var frames = int.Parse(ctx.Arg("frames", "300"), CultureInfo.InvariantCulture);
             var warmupFrames = int.Parse(ctx.Arg("warmup_frames", "30"), CultureInfo.InvariantCulture);
             var input = Work.MakeInput();
+            ctx.Headline("frame steady p50", "frame steady p95");
 
             var recorder = ctx.RecordFrames("frame", "warmup");
             for (var frame = 0; frame < frames; frame++)
