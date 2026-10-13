@@ -3,5 +3,8 @@
   "version": "0.3.0",
   "displayName": "Unity Bench",
   "description": "Batch entry and adapter API for Unity Bench: built-in Editor workloads (script edit, Play Mode, player build), Editor adapters, and a player-side adapter runtime.",
-  "unity": "6000.0"
+  "unity": "6000.0",
+  "dependencies": {
+    "com.unity.modules.jsonserialize": "1.0.0"
+  }
 }
