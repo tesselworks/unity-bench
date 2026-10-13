@@ -83,9 +83,12 @@ def render(summary, campaign, rows):
             header = ['Item', *[v + (' (A)' if v == base else '') for v in w['variants']], *[f'{v}/{bases[v]}' for v in compared], 'Work']
             body = []
             for item in w['items']:
-                work = {'identical': 'same', 'unreported': 'not reported'}.get(item['identity']['status'], '?')
-                body.append([item['name'], *[cell(item['variants'].get(v)) for v in w['variants']],
-                             *[ratio_cell(item['ratios'].get(v)) for v in compared], work])
+                work = {'identical': 'same', 'unreported': 'not reported'}.get(item['identity']['status'])
+                if work is None:   # differs somewhere, but the same within at least one compared pair
+                    work = 'same within ' + ', '.join(f'{v}/{bases[v]}' for v in compared if item['pair_work'].get(v) == 'same')
+                pair_cells = [ratio_cell(item['ratios'].get(v)) if item.get('pair_work', {}).get(v) != 'differs' else 'work differs'
+                              for v in compared]
+                body.append([item['name'], *[cell(item['variants'].get(v)) for v in w['variants']], *pair_cells, work])
             lines += table(header, body)
             notes = []
             for item in w['items']:
@@ -104,11 +107,11 @@ def render(summary, campaign, rows):
         for v, agg in w['aggregate'].items():
             lines += ['', f"`{v}` vs `{bases[v]}`: geometric mean of {agg['items']} ratios {agg['geomean']:.2f}; {agg['faster_separated']} faster and {agg['slower_separated']} slower with non-overlapping ranges."]
         if w['differing']:
-            lines += ['', f"**{len(w['differing'])} item(s) did different work or produced different output across variants or repeats. They are excluded from the table and the geometric mean above.** "
+            lines += ['', f"**{len(w['differing'])} item(s) did different work or produced different output in every compared pair, or varied within a variant. They are excluded from the table and the geometric mean above.** "
                       'Their timings are shown here for diagnosis only; a ratio between different work is not a speed comparison.', '']
             compared = [v for v in w['variants'] if bases[v] != v]
             lines += table(['Item', 'Why', 'Values', *[f'{v}/{bases[v]}' for v in compared]],
-                           [[i['name'], i['identity']['detail'], describe_fingerprints(i['identity']['values']), *[ratio_cell(i['ratios'].get(v)) for v in compared]] for i in w['differing']])
+                           [[i['name'], i['identity']['detail'], describe_fingerprints(i['identity']['values']), *[ratio_cell(i['diagnostic_ratios'].get(v)) for v in compared]] for i in w['differing']])
         if w['first_use'] and summary['exclude_first_use']:
             lines += ['', 'First-use samples (kept in results.jsonl; one per process; ms):', '']
             lines += table(['Item', 'Variant', 'Samples'], [[f['name'], f['variant'], ', '.join(ms(x) for x in f['ms'])] for f in w['first_use']])

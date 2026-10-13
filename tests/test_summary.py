@@ -93,6 +93,25 @@ class SummariseTests(unittest.TestCase):
         self.assertEqual([i['name'] for i in kept['items']], ['fast', 'odd'])
         self.assertEqual(kept['differing'], [])
 
+    def test_work_is_judged_per_compared_pair(self):
+        # 6.7 does different work from both 7 variants, which match each other: the 7/7 ratio stays, the 7/6.7 one is withheld.
+        rows = [process(i, v) for i, v in enumerate(('6.7', '7i', '7c'))]
+        rows += [sample(0, '6.7', 'frame', 10, counters={'fractures': 100}),
+                 sample(1, '7i', 'frame', 11, counters={'fractures': 102}),
+                 sample(2, '7c', 'frame', 8, counters={'fractures': 102})]
+        w = summary.summarise(rows, baselines={'7i': '6.7', '7c': '7i'})['workloads'][0]
+        self.assertEqual([i['name'] for i in w['items']], ['frame'])
+        item = w['items'][0]
+        self.assertEqual(item['pair_work'], {'7i': 'differs', '7c': 'same'})
+        self.assertIsNone(item['ratios']['7i'])
+        self.assertAlmostEqual(item['ratios']['7c']['ratio'], 8 / 11)
+        self.assertAlmostEqual(item['diagnostic_ratios']['7i']['ratio'], 11 / 10)
+        # When every compared pair differs, the item is set apart as before.
+        rows[-1] = sample(2, '7c', 'frame', 8, counters={'fractures': 101})
+        w = summary.summarise(rows, baselines={'7i': '6.7', '7c': '7i'})['workloads'][0]
+        self.assertEqual(w['items'], [])
+        self.assertEqual([i['name'] for i in w['differing']], ['frame'])
+
     def test_aggregate_geomean(self):
         rows = []
         for i, v in enumerate(['a', 'b']):
