@@ -256,6 +256,10 @@ class Campaign:
                     self.projects[v['id']], self.worktrees[v['id']] = project, worktree
                     store.touch(entry)
                     prep.update(status='reused', entry=entry, seconds=round(time.time() - started, 2), method=result['method'], built_seconds=entry.meta.get('built_seconds'))
+                    if v.get('revision') and info.get('mode') == 'worktree' and identity['commit'] != info.get('commit'):
+                        # The key is the content of the project, so the entry can come from an older commit with the same content: this run's commit is the
+                        # one reported, the commit the copy was made at is kept next to it.
+                        info = {**info, 'prepared_from_commit': info.get('commit'), 'commit': identity['commit']}
                     record['provenance']['variants'][v['id']] = {**info, 'prepared': public(prep)}
                     return
             if why not in ('no entry', 'reuse is off'):
@@ -271,11 +275,11 @@ class Campaign:
         root = Path(worktree[1] if worktree else project)
         prepare_project(self.cfg, v, root, project, self.out)
         if store:
-            self.prime_and_snapshot(v, project, root, key, parts, hashed, info, prep, started, log)
+            self.prime_and_snapshot(v, project, root, key, parts, identity, hashed, info, prep, started, log)
         prep['seconds'] = round(time.time() - started, 1)
         info['prepared'] = public(prep)
 
-    def prime_and_snapshot(self, v, project, root, key, parts, hashed, info, prep, started, log):
+    def prime_and_snapshot(self, v, project, root, key, parts, identity, hashed, info, prep, started, log):
         """The untimed first open (import and, on a newer Editor, migration), then a snapshot of the result as cache entry `key`.
 
         A failed or timed-out open leaves the copy as it is and no entry: a snapshot is only taken from a clean point (the Editor exited 0 and left no Temp).
@@ -300,7 +304,7 @@ class Campaign:
             workspace.snapshot_root(root, staged / 't')
             data = cache.manifest(staged / 't', relative)
             files, size = cache.tree_size(staged / 't')
-            meta = {'variant': v['id'], 'components': parts, 'project_relative': relative, 'mode': info.get('mode'), 'info': {k: x for k, x in info.items() if k != 'prepared'},
+            meta = {'variant': v['id'], 'components': parts, 'source': identity, 'project_relative': relative, 'mode': info.get('mode'), 'info': {k: x for k, x in info.items() if k != 'prepared'},
                     'manifest': data, 'manifest_digest': cache.manifest_digest(data), 'built_seconds': round(time.time() - started, 1), 'prime_ms': run.wall_ms,
                     'files': files, 'size_bytes': size, 'settings_changed_by_priming': changed[:30], 'prepare_inputs': hashed, 'framework': __version__}
             entry = self.store.commit(staged, key, meta)

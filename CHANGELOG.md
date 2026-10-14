@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A prepared copy of a `revision` variant is now keyed by content, not by commit.** The cache key used to contain the resolved commit, so any commit, even one that only touched a workflow file or a README, made the next run prepare every copy again (minutes of copy, prepare and re-import per variant); on a CI branch that moves all the time the cache was almost never reused. The key now holds the git tree of the project directory at that commit (for a project at the repository root: the trees of `Assets`, `Packages` and `ProjectSettings` only) and, for every `file:` dependency in `Packages/manifest.json`, the tree (or blob, for a tarball) of the path it points to at that commit; a `file:` path outside the repository is keyed by a digest of its files' paths, sizes and times, as a plain copy is. The package-lock digest and the project's place in the repository stay in the key. A plain copy is keyed as before.
+- The commit is still recorded, in the provenance and the report. When a run reuses a copy that was made at an older commit with the same content, the provenance names this run's `commit` and adds `prepared_from_commit`; the report's "Project commit" cell says so. `cache list` shows the commit the entry was made at.
+- The cache format is 2: entries written by 0.6.0 and earlier are not read (`entry was written by another cache format`) and are removed by `cache prune`; the first run prepares each copy once more.
+
 ## 0.6.0
 
 Editor memory: a breakdown on every Editor process, and workloads that ask whether an Editor keeps growing when the same code is reloaded again and again (tesselworks/unity-bench#15). Philosophy unchanged: annotate, do not refuse; a counter an Editor does not offer is listed, not an error.

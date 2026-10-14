@@ -24,7 +24,7 @@ import time
 
 from . import fastcopy
 
-FORMAT = 1
+FORMAT = 2   # 2: a worktree variant is keyed by the content of its project and local packages, not by its commit
 SNAPSHOT_SKIP = ('.git', 'Temp', 'Logs')   # never part of a snapshot: git metadata of a worktree, and what a running Editor leaves
 MAX_AUTO_HASHED_FILE = 8 << 20             # a file named on a prepare command line is hashed into the key up to this size
 
@@ -204,9 +204,14 @@ def prepare_digest(project, variant_id):
 
 def components(cfg, variant, target, identity, editor, injected):
     """Everything that decides what a prepared copy is. `identity` comes from `workspace.source_identity`, `injected` is the digest of the Unity package
-    put into the copy (None when the campaign does not inject it)."""
+    put into the copy (None when the campaign does not inject it).
+
+    A worktree identity names its commit for provenance, but the commit is not part of the key: what the copy is made of is the git objects of the project
+    and its local packages, and a commit that changes none of them (a workflow file, a README) must find the same entry. A plain copy has no such objects
+    and keeps the commit its directory is at."""
     prepare, hashed = prepare_digest(cfg['project'], variant['id'])
-    return {'format': FORMAT, 'source': identity, 'editor': editor['full'], 'backend': variant['backend'], 'build': variant['build'],
+    source = {k: v for k, v in identity.items() if k != 'commit'} if identity.get('mode') == 'worktree' else identity
+    return {'format': FORMAT, 'source': source, 'editor': editor['full'], 'backend': variant['backend'], 'build': variant['build'],
             'injected_package': injected, 'prepare': prepare, 'path': os.path.normcase(os.path.abspath(str(target)))}, hashed
 
 
@@ -436,7 +441,7 @@ def listing(store):
             lines.append(f'{e.key:<17}(unreadable: remove with `cache prune`)')
             continue
         c = m.get('components', {})
-        source = c.get('source', {})
+        source = {**c.get('source', {}), **(m.get('source') or {})}   # the commit of a worktree entry is in `source`, not in the key
         what = (source.get('commit') or source.get('tree') or '?')[:12] + (' wt' if source.get('mode') == 'worktree' else ' copy')
         lines.append(f"{e.key:<17}{str(c.get('editor', '?'))[:25]:<26}{str(m.get('variant', '?'))[:13]:<14}{what:<22}{human_size(m.get('size_bytes', 0)):>10}  "
                      f"{m.get('last_used', ''):<20}{m.get('uses', 0):>7}  {m.get('built_seconds', 0):.0f} s")

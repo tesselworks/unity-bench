@@ -124,6 +124,8 @@ def commit_text(info):
     text = info['commit'][:12]
     if info.get('revision') and not info['commit'].startswith(info['revision']):
         text += f" ({info['revision']})"
+    if info.get('prepared_from_commit'):
+        text += f" (prepared copy from {info['prepared_from_commit'][:12]}, same project content)"
     return text + (f" +{info['dirty_files']} uncommitted" if info.get('dirty_files') else '')
 
 
