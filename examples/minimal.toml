@@ -16,6 +16,11 @@ baseline = "unity-6.7"           # ratios are other / baseline
 # il2cpp_code_generation = "OptimizeSpeed"
 # stripping = "Minimal"
 
+# Where each process starts (see docs/methodology.md#cache-states). The defaults keep each kind's old behaviour: cold_open is `cold`, the rest `as-is`.
+# `state = "warm"` on a workload restores the snapshot of the prepared project copy before every process; `cold` also isolates the global caches.
+# [cache]
+# isolate = ["compilation", "upm", "accelerator"]   # what `cold` points at empty directories; [] makes `cold` only delete Library
+
 [[variants]]
 id = "unity-6.7"
 editor = "/Applications/Unity/Hub/Editor/6000.7.0b2/Unity.app/Contents/MacOS/Unity"
@@ -41,6 +46,7 @@ headline = true                  # items an aggregate may include; without it a 
 [[workloads]]
 id = "warm-open"
 kind = "editor.warm_open"
+# state = "warm"                 # every process starts from the prepared copy's snapshot instead of from what the last one left
 repeats = 4
 headline = true
 

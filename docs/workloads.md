@@ -15,9 +15,26 @@ Common workload keys: `id`, `kind`, `repeats` (fresh processes per variant), `ro
 | `player.startup` | file timestamp from outside the player | `launch_to_probe`, `engine_to_probe`, `launch_to_exit` | launches a built player |
 | `player.adapter` | the adapter's own | the adapter's | see [adapters.md](adapters.md#player-adapter-playeradapter) |
 
+## Start state (`state`)
+
+Every workload that starts an Editor on the project (`editor.*` and `player.build_time`) takes `state = "cold" | "warm" | "as-is"`. The default keeps the behaviour of each kind: `editor.cold_open` is `cold`, everything else `as-is`. What the states are, what `cold` isolates and how snapshots work: [methodology](methodology.md#cache-states).
+
+```toml
+[[workloads]]
+id = "warm-open"
+kind = "editor.warm_open"
+state = "warm"          # every process starts from the snapshot of the prepared copy, not from what the last one left
+repeats = 4
+
+[cache]                  # optional, campaign-wide
+isolate = ["compilation", "upm", "accelerator"]   # what `cold` points at empty directories (this is the default); [] = `cold` only deletes Library
+```
+
+`state` is not accepted on `player.startup` and `player.adapter`: they run a built player, which has no project start state (the build workload they use has one).
+
 ## editor.cold_open and editor.warm_open
 
-The time is the wall clock of the whole Editor process: launch, open, import whatever is out of date, quit. The first open of a variant's project copy is not representative: it imports everything and, on a newer Editor, migrates the project. It is labelled first-use. `repeats` includes that first one, so ask for one more than the number of samples you want.
+The time is the wall clock of the whole Editor process: launch, open, import whatever is out of date, quit. Repeat 0 is labelled first-use (the OS file cache, JIT and the first launch of that copy), so `repeats` should include it: ask for one more than the number of samples you want. Since v0.4 the import and migration of a variant's copy happen in an untimed priming open before the schedule (see [methodology](methodology.md#prepared-copies-snapshots-and-reuse)), so they no longer fall into the first `warm_open`; `cold_open` imports everything in every process. `--no-cache` restores the v0.3 behaviour, where the first open of a copy imports it.
 
 Code optimization has no effect here because it is applied after the project has opened.
 
@@ -131,10 +148,24 @@ path = "../unity/MyProject"
 prepare = [["{python}", "{campaign}/prepare.py", "--root", "{root}", "--project", "{project}"]]
 ```
 
-Variants that no scheduled workload uses get no copy. `unity-bench run --work <dir>` puts the copies elsewhere than `<run dir>/work`; on Windows a short path keeps Library paths under the 260-character limit.
+Variants that no scheduled workload uses get no copy.
+
+**Where the copies go.** By default `<cache dir>/w/<variant id>`, the same place on every run, because Unity's `Library` holds absolute paths and a prepared copy only stays prepared at the path it was prepared at. `unity-bench run --work <dir>` puts them elsewhere; keep using the same directory (the path is part of the cache key), and on Windows prefer a short one, which keeps Library paths under the 260-character limit. With `--no-cache` the default is `<run dir>/work` as before. Two campaigns that use the same work directory and variant ids must not run at the same time.
+
+**What the prepare step is, for the cache.** The prepared copy is reused when the key matches (see [methodology](methodology.md#prepared-copies-snapshots-and-reuse)); the key includes the prepare commands and the contents of any file a command names by an absolute path or under `{campaign}` (up to 8 MB). A script usually depends on more than itself, so list the rest:
+
+```toml
+[project]
+prepare = [["{python}", "{campaign}/prepare.py", "--root", "{root}", "--project", "{project}", "--with", "core"]]
+prepare_inputs = ["adapters", "helpers.py"]   # files or directories relative to this campaign file; their contents are part of the key
+```
+
+A campaign whose prepare commands differ from another's gets its own prepared copy: to share one across the campaigns of a session, give them the same `prepare` (stage the union of what they need).
+
+`{variant}` in a prepare command also puts the variant's id into the key (otherwise the id is not: the live path, which contains it, is).
 
 ## Output files
 
-A run directory contains `campaign.json` (resolved campaign, schedule and its notes, host, provenance: framework version and commit, and per variant the resolved project commit), `results.jsonl` (raw; one row per process, sample and reload group; a process row carries its environment, the player's `build` settings, adapter-declared `headline` patterns, the `cleanup` record of what was terminated and what was left running, and the host's one-second CPU/memory series), `summary.md` and `summary.json` (regenerated by `unity-bench report`), and `logs/`, `requests/`, `results/` for every process. `--keep-work` keeps the project copies and builds, which can be large.
+A run directory contains `campaign.json` (resolved campaign, schedule and its notes, host, provenance: framework version and commit, and per variant the resolved project commit), `results.jsonl` (raw; one row per process, sample and reload group, plus a `prepare` row for each untimed priming open; a process row carries its start `state`, its environment, the player's `build` settings, adapter-declared `headline` patterns, the `cleanup` record of what was terminated and what was left running, and the host's one-second CPU/memory series), `summary.md` and `summary.json` (regenerated by `unity-bench report`), and `logs/`, `requests/`, `results/` for every process. `--keep-work` keeps the project copies and builds, which can be large.
 
 `unity-bench run` exits 0 when every scheduled process succeeded and produced samples, 2 on a usage or configuration error, and 3 after a complete run in which a process failed, never ran or left a (workload, variant) without samples; the lines are printed to stderr.

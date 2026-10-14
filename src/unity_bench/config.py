@@ -9,6 +9,8 @@ import re
 
 import tomllib
 
+from . import states
+
 BUILD_KEYS = {'development', 'scene', 'scenes', 'build_target', 'backend', 'prebuild'}   # what decides which player a workload gets
 KINDS = {
     'editor.cold_open': {'description': 'Delete Library, open the project in batchmode, quit.'},
@@ -69,10 +71,10 @@ def load(path):
 def validate(raw, base):
     """Return the campaign with defaults applied and paths resolved against `base`."""
     require(isinstance(raw, dict), 'Campaign must be a table')
-    unknown(raw, {'name', 'project', 'defaults', 'build', 'variants', 'workloads'}, 'campaign')
+    unknown(raw, {'name', 'project', 'defaults', 'build', 'cache', 'variants', 'workloads'}, 'campaign')
     identifier(raw.get('name'), 'name')
     project = raw.get('project') or {}
-    unknown(project, {'path', 'repository', 'inject_package', 'prepare'}, 'project')
+    unknown(project, {'path', 'repository', 'inject_package', 'prepare', 'prepare_inputs'}, 'project')
     require(isinstance(project.get('path'), str) and project['path'], 'project.path is required')
     base = Path(base)
     root = (base / project['path']).resolve()
@@ -82,6 +84,15 @@ def validate(raw, base):
     prepare = project.get('prepare', [])
     require(isinstance(prepare, list) and all(isinstance(c, list) and c and all(isinstance(x, str) for x in c) for c in prepare),
             'project.prepare must be a list of commands, each a non-empty list of strings')
+    prepare_inputs = project.get('prepare_inputs', [])
+    require(isinstance(prepare_inputs, list) and all(isinstance(x, str) and x for x in prepare_inputs),
+            'project.prepare_inputs must be a list of paths (files or directories, relative to the campaign file) the prepare commands depend on')
+    cache_table = raw.get('cache') or {}
+    require(isinstance(cache_table, dict), 'cache must be a table')
+    unknown(cache_table, {'isolate'}, 'cache')
+    isolate = cache_table.get('isolate', list(states.DEFAULT_ISOLATE))
+    require(isinstance(isolate, list) and all(x in states.ISOLATE for x in isolate) and len(set(isolate)) == len(isolate),
+            f'cache.isolate must be a list of unique names from {", ".join(states.ISOLATE)} (empty: a cold start only deletes Library)')
 
     defaults = {'repeats': 4, 'rounds': 5, 'timeout_seconds': 1800, 'build_timeout_seconds': 3600,
                 'exclude_first_use': True, 'baseline': None, **(raw.get('defaults') or {})}
@@ -119,7 +130,9 @@ def validate(raw, base):
     require(isinstance(raw.get('workloads'), list) and raw['workloads'], 'At least one [[workloads]] entry is required')
     for w in raw['workloads']:
         require(w.get('kind') in KINDS, f'workload kind must be one of {", ".join(KINDS)}')
-        unknown(w, COMMON_KEYS | KINDS[w['kind']].get('keys', set()), 'workload ' + str(w.get('id')))
+        require('state' not in w or w['kind'] in states.STATE_KINDS,
+                f"workload {w.get('id')}: state applies to workloads that start an Editor on the project; {w['kind']} runs a built player (set it on the build workload)")
+        unknown(w, COMMON_KEYS | KINDS[w['kind']].get('keys', set()) | ({'state'} if w['kind'] in states.STATE_KINDS else set()), 'workload ' + str(w.get('id')))
         identifier(w.get('id'), 'workload.id')
         require(w['id'] not in wids, f'Duplicate workload {w["id"]}')
         wids.add(w['id'])
@@ -146,8 +159,8 @@ def validate(raw, base):
         if w['kind'] == 'editor.script_edit' and any(t['root'] == 'worktree' for t in w['targets']):
             require(set(w['variants']) <= revisions, f'workload {w["id"]}: targets with root = "worktree" need every selected variant to set a revision')
     return {'name': raw['name'], 'project': {'path': str(root), 'repository': str(repository) if repository else None, 'inject_package': inject,
-                                             'prepare': prepare, 'campaign_dir': str(base.resolve())},
-            'defaults': defaults, 'variants': variants, 'workloads': workloads}
+                                             'prepare': prepare, 'prepare_inputs': prepare_inputs, 'campaign_dir': str(base.resolve())},
+            'cache': {'isolate': isolate}, 'defaults': defaults, 'variants': variants, 'workloads': workloads}
 
 
 def build_settings(table, what):
@@ -161,6 +174,9 @@ def build_settings(table, what):
 
 def check_kind(w):
     kind, wid = w['kind'], w['id']
+    if kind in states.STATE_KINDS:
+        w.setdefault('state', states.default_state(kind))
+        require(w['state'] in states.STATES, f'workload {wid}: state must be one of {", ".join(states.STATES)}')
     if kind == 'editor.script_edit':
         targets = w.get('targets')
         require(isinstance(targets, list) and targets, f'workload {wid}: targets must be a non-empty list')

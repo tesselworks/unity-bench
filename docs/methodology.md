@@ -32,6 +32,64 @@ The schedule is fixed before anything runs (`unity-bench plan <campaign>` prints
 
 When a process ends, every process still alive in its group (POSIX) or job (Windows) is terminated, and the report says which ones (for example Unity's asset import workers and build backend). One class is deliberately left alone: **shared Unity daemons**, today the Unity Licensing Client. An Editor starts it, but it serves every Editor on the machine; killing it with the Editor's tree would make the next Editor pay to start it again and would take it away from the Editor you have open yourself. On Windows the licensing client cannot be allowed to "break away" from the job (the Editor creates it without the breakaway flag, and silent breakaway would let every child escape), so cleanup lists the job's members, terminates all but the shared ones, and clears the job's kill-on-close limit before closing it. On POSIX the group is signalled member by member instead of with one `killpg`. A job or group without a shared daemon, or one that cannot be listed, is still killed atomically. A surviving daemon can have a project copy as its working directory, which on Windows keeps that directory from being deleted: the runner removes the contents, retries, reports what it could not remove (`left_behind` in `campaign.json`), and a later run reuses an emptied leftover directory (it refuses one that still has files, and never deletes them for you).
 
+## Cache states
+
+Unity caches in many places, and "cold" used to mean only "`Library` deleted". Each workload that starts an Editor on the project (`editor.*`, `player.build_time`) now says where it starts with `state`, and every process records the state it actually had.
+
+| State | The process starts from | Default for |
+| --- | --- | --- |
+| `cold` | `Library` deleted, and the global caches below pointed at empty directories made for that one process | `editor.cold_open` |
+| `warm` | the snapshot taken after the variant's copy was prepared and imported: the whole copy (Assets, ProjectSettings, Packages, `Library`) is put back before every process | nothing; ask for it |
+| `as-is` | whatever the previous process left | every other workload, as before v0.4 |
+
+`warm` is what makes repeats comparable: every process starts from the same state instead of from whatever the previous one left (a `warm_open` after a script edit workload, a Play Mode process after a build). `as-is` stays the default because some workloads are meant to build on each other (an incremental build starts from the cache the clean builds left).
+
+The record is in `results.jsonl` (`state` on each process row: requested and actual state, snapshot key, restore time and method, whether the restored copy matched the snapshot, the isolated caches, and the Editor's own count of assets imported at open, read from its log) and in the report ("Start states and prepared copies"): `warm (snapshot <key>)`, `cold (Library removed; isolated: compilation, upm, accelerator)`. A state that could not be set up is not an error: the process runs from what is there and says so (`requested warm, actual as-is`, with the reason).
+
+### Prepared copies, snapshots and reuse
+
+Preparing a variant's copy used to repeat in every campaign: copy or check out, inject the package, run `project.prepare`, and import everything in the first measured open (about 3.5 minutes per variant and campaign in the first Windows session). Now:
+
+1. After `project.prepare`, an untimed **priming open** (`-quit`, recorded as a `prepare` row, not a process) imports the project and, on a newer Editor, migrates it.
+2. That state is **snapshotted** (the copy's root without `.git`, `Temp` and `Logs`, `Library` included) as a cache entry. Only a clean point is snapshotted: the Editor exited 0. A failed priming open is recorded, nothing is cached, and the schedule runs on the unprimed copy (as in v0.3).
+3. The next run, or the next campaign of a session, finds the entry by its **key** and restores it instead of preparing: `prepared: reused <key>` instead of `prepared: built (N s)`.
+
+The key is made of everything that decides what the prepared state is: the resolved project commit (for a plain copy, a digest of the files' paths, sizes and times), the full Editor version with its revision, the variant's backend and `build` settings, the digest of `Packages/packages-lock.json`, the digest of the injected Unity package, the digest of the prepare step (the commands, the files they name and `project.prepare_inputs`, see [workloads.md](workloads.md#preparing-the-project-copy)), and **the absolute path of the live copy**. The path is in the key because Unity's `Library` holds absolute paths: a primed project opened from another directory recompiled all its scripts (31 s instead of 0.5 s on the example project, 6000.7.0b2 on macOS). So the live copies sit in a fixed place, `<cache dir>/w/<variant id>` by default or whatever `--work` names, and a different `--work` is a different entry.
+
+Guards against a prepared copy that is no longer what its key says:
+
+- Each entry stores a **manifest**: the top level of the copy, the SHA-256 of every `ProjectSettings` file and of the package manifest and lock, the size of the top-level files, (files, bytes, newest time) of `Assets` and `Packages`, and the top level of `Library` with the size and time of `Library/ArtifactDB` and `SourceAssetDB`. It is compared again before the entry is used. If anything differs, the entry is discarded and the copy is prepared again (`prepared: built ... the cached copy was not used: files changed since the snapshot: ProjectSettings/EditorSettings.asset`).
+- After every restore the live copy is compared with the same manifest (`verified` on the process row); a mismatch is restored once more and then recorded.
+- Every process row lists the settings files the Editor rewrote during that process (`settings_changed`), and the entry records which ones the priming open changed.
+- A key is exact, not approximate: touching a source file of a plain copy changes it (a re-preparation, never a stale reuse).
+
+The manifest is cheap on purpose (a few hundred KB hashed, a stat of the project's own files); it does not hash `Library`. It detects edits, deletions and a half-made copy, not a bit flip inside a cache file.
+
+Restoring replaces the whole top level of the live copy by a copy of the snapshot. On macOS that is an APFS clone (`clonefile`, no data is copied; writes of either side diverge, nothing is hard-linked) and takes well under a second for a small project. On Linux it is `cp --reflink=auto` (a reflink on btrfs and XFS, a plain copy elsewhere). On Windows it is a parallel copy through the OS copy call, which clones blocks on ReFS and Dev Drives where Windows does so and is a plain copy on NTFS; long paths use the `\\?\` prefix, and deleting is retried while the Editor's children still hold files. The method and time are recorded per process (`restore_method`, `restore_ms`).
+
+`unity-bench cache list` shows the entries (key, Editor, variant, source, size, last use, how often reused); `unity-bench cache prune [--older-than 30d] [--keep N] [--dry-run]` deletes by age and count. An entry is the size of the project plus its `Library`; on a file system without clones, the live copy and the entry each take that much. `--cache-dir` (or `UNITY_BENCH_CACHE_DIR`) chooses the directory, `--no-cache` goes back to v0.3 (prepare everything, keep nothing; a `warm` workload still gets a snapshot for that run).
+
+### What `cold` isolates
+
+`cold` deletes `Library` and sets the following for that one Editor process. The directories are empty and private to the process (a fresh temporary directory, deleted afterwards), so the user's real caches are neither read nor written. A campaign chooses the set with `[cache] isolate = ["compilation", "upm", "accelerator"]` (the default; `[]` makes `cold` only delete `Library`).
+
+| Cache | Where it lives | Isolated by | Evidence (macOS, 6000.7.0b2 and 7000.0.0a7) |
+| --- | --- | --- | --- |
+| Script compilation cache (Bee; "Compilation cache" in Preferences) | `~/Library/Unity/cache/bee` (macOS) | `BEE_CACHE_DIRECTORY` | A cold process's log ends with `Total cache size 143611` (6000.7.0b2) / `147627` (7000.0.0a7), the size of the empty directory; a normal process on the same project prints `267305024`, the user's. Three cold opens in a row printed the same size, and the user's directory kept its file count, size and newest modification time |
+| Package Manager global cache (registry tarballs, git checkouts, package database) | `~/Library/Unity/cache/{npm,packages}` and `~/Library/Caches/Unity/upm` (macOS) | `UPM_CACHE_ROOT` | The empty directory receives `db`; in a project with `com.unity.postprocessing` (not shipped with the Editor) it grew to 48 MB, the first open took 21.5 s / 19.2 s against 8.4 s / 8.9 s for the second, and the user's caches were untouched. The Editor itself says "The Packages Cache location is set by environment variable UPM_CACHE_ROOT" |
+| Accelerator / cache server (shared asset import results and shader cache) | a server, when the project or the user's preferences name one | `-cacheServerEnableDownload false -cacheServerEnableUpload false` | Off by default. Both Editors accept the arguments and their logs report `Imports: total=N (actual=N, local cache=0, cache server=0)`; not tried against a real Accelerator |
+| Imported assets, shader cache (`Library/ShaderCache`), Burst cache (`Library/BurstCache`), Bee artifacts, `PackageCache`, IL2CPP and build caches | inside the project's `Library` | deleting `Library` | A cold open's log says `Imports: total=43 (actual=43, local cache=0, cache server=0)`, a warm one `total=0` |
+
+The variables are not specific to an OS, and Unity's own defaults for the locations differ (the Windows and Linux ones were not looked up here). On Windows and Linux the isolation uses the same variables and arguments, but only macOS was verified.
+
+Not isolated:
+
+- **GI cache** (`GICacheFolder`): an Editor preference (`GICacheFolder`, shared by all projects) with no command-line switch or environment variable that we found in either Editor. It only matters for workloads that bake lighting. Its default location per OS was not looked up.
+- **Asset Store cache** (`ASSETSTORE_CACHE_PATH` exists, but nothing in these workloads reads it) and the MSBuild project cache (`UNITY_MSBUILD_PROJECT_CACHE_DIR`): not touched, not verified to matter.
+- The **OS file cache** and, with a window or a player, the **GPU driver's shader cache**: not controllable from here. A first open after a reboot pays for the first. This is why the first process of a workload is labelled first-use.
+- Per-user settings (the Editor's preferences, licensing) are deliberately left alone. Redirecting `HOME` would be the blunt way to isolate everything, but it would also move the license and preferences that Unity finds there; that was not tried.
+- With `upm` isolated, a project with registry packages downloads them for every cold process (the Editor ships some offline; the rest come from the network). That is the cost of a first open on a clean machine, and it makes cold opens depend on the network; drop `upm` from `isolate` for a campaign that must run offline.
+
 ## What is measured
 
 Built-in workloads measure wall time with the clock described in [workloads.md](workloads.md): the whole Editor process for opens, in-Editor stopwatches for edits, Play Mode and builds, a file timestamp for player startup. Project adapters bring their own stopwatch around exactly the work they care about ([adapters.md](adapters.md)).
@@ -138,7 +196,7 @@ python3 unity-bench.py report <run dir> <the report options named in summary.md>
 
 - The Editor runs in `-batchmode -nographics`. There is no GPU rendering, no window and no Inspector refresh. "A frame" in Play Mode is an update, not a presented image. Player startup is headless by default for the same reason.
 - n is small by design (minutes, not days). The report gives ranges and an optional bootstrap interval, not p-values.
-- Deleting `Library` does not make an OS, package or shader cache cold; "cold open" means "open with `Library` deleted".
+- `cold` deletes `Library` and isolates the caches listed under [Cache states](#cache-states); the OS file cache, the GPU driver's shader cache and the GI cache stay as they are.
 - Built-in Editor workloads measure the Editor on your project, including its asset-pipeline and package state. They do not separate Unity's own cost from your project's.
 - A newer Editor migrates an older project on its first open. That cost is real but one-off, which is why it is first-use. The migrated settings can change physics or rendering; compare the project settings per variant if it matters.
 - Absolute numbers belong to one machine at one moment. Ratios between variants measured in the same campaign travel better than the milliseconds do.

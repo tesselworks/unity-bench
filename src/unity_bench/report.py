@@ -167,6 +167,121 @@ def render_variants(summary, campaign, variants):
     return lines
 
 
+def prepared_text(prep):
+    """`prepared: reused <key>` or `prepared: built (N s)`, with what else the run knows about it."""
+    if not prep:
+        return 'not recorded'
+    if prep.get('status') == 'reused':
+        text = f"reused `{prep['key']}`"
+        if prep.get('seconds') is not None:
+            text += f" (restored in {'<0.1' if prep['seconds'] < 0.05 else format(prep['seconds'], '.1f')} s" + (f", {prep['method']}" if prep.get('method') else '') + ')'
+        if prep.get('built_seconds') is not None:
+            text += f"; it took {prep['built_seconds']:.0f} s to build"
+        return text
+    text = f"built ({prep['seconds']:.0f} s)" if isinstance(prep.get('seconds'), (int, float)) else 'built'
+    if prep.get('key') and not prep.get('note'):
+        text += f", cached as `{prep['key']}`"
+    if prep.get('rebuilt_because'):
+        text += f"; the cached copy was not used: {prep['rebuilt_because']}"
+    if prep.get('note'):
+        text += f"; {prep['note']}"
+    return text
+
+
+def median(values):
+    values = sorted(values)
+    return values[len(values) // 2] if len(values) % 2 else (values[len(values) // 2 - 1] + values[len(values) // 2]) / 2
+
+
+def states_summary(rows, campaign):
+    """Per (workload, variant): the start state the processes asked for and actually had, restore times, isolated caches and the Editor's own count of imports."""
+    groups = {}
+    for r in rows:
+        if r['type'] == 'process' and r.get('state') and not r.get('role'):
+            g = groups.setdefault((r['workload'], r['variant']), {'workload': r['workload'], 'variant': r['variant'], 'requested': set(), 'actual': Counter(), 'snapshots': set(),
+                                                                  'methods': set(), 'restore_ms': [], 'verified': Counter(), 'isolated': {}, 'imports': [], 'cache_server_imports': 0,
+                                                                  'settings_changed': set(), 'notes': set()})
+            st = r['state']
+            g['requested'].add(st['requested'])
+            g['actual'][st['actual']] += 1
+            if st.get('snapshot'):
+                g['snapshots'].add(st['snapshot'])
+            if st.get('restore_method'):
+                g['methods'].add(st['restore_method'])
+            if st.get('restore_ms') is not None:
+                g['restore_ms'].append(st['restore_ms'])
+                g['verified'][bool(st.get('verified'))] += 1
+            g['isolated'].update(st.get('isolated') or {})
+            if st.get('imports'):
+                g['imports'].append(st['imports']['actual'])
+                g['cache_server_imports'] += st['imports'].get('cache_server', 0)
+            g['settings_changed'].update(st.get('settings_changed') or [])
+            g['notes'].update(st.get('notes') or [])
+    out = []
+    for g in groups.values():
+        out.append({**g, 'requested': sorted(g['requested']), 'actual': dict(g['actual']), 'snapshots': sorted(g['snapshots']), 'methods': sorted(g['methods']),
+                    'verified': {str(k).lower(): v for k, v in g['verified'].items()}, 'isolated': list(g['isolated']), 'settings_changed': sorted(g['settings_changed']),
+                    'notes': sorted(g['notes']), 'restore_ms_median': median(g['restore_ms']) if g['restore_ms'] else None})
+    prepared = {vid: info['prepared'] for vid, info in (campaign.get('provenance', {}).get('variants') or {}).items() if info.get('prepared')}
+    return {'prepared': prepared, 'workloads': out}
+
+
+def state_text(g):
+    """One cell: the state the processes had (`warm (snapshot <key>)`), and when it was not the state asked for, what happened."""
+    actual = g['actual']
+    names = sorted(actual)
+    if names == ['warm']:
+        text = 'warm (snapshot ' + ', '.join(f'`{k}`' for k in g['snapshots']) + ')'
+    elif names == ['cold']:
+        text = 'cold (Library removed' + (f"; isolated: {', '.join(g['isolated'])}" if g['isolated'] else '; no global cache isolated') + ')'
+    elif names == ['as-is']:
+        text = 'as-is' if g['requested'] == ['as-is'] else f"as-is (asked for {', '.join(g['requested'])}; " + ('; '.join(g['notes']) or 'see results.jsonl') + ')'
+    else:
+        text = ', '.join(f'{n} x{c}' for n, c in sorted(actual.items())) + f" (asked for {', '.join(g['requested'])})"
+    return text
+
+
+def render_states(summary, campaign, rows):
+    data = summary.get('states') or {}
+    if not data.get('prepared') and not data.get('workloads'):
+        return []
+    cache = campaign.get('cache') or {}
+    lines = ['', '## Start states and prepared copies', '']
+    if cache:
+        lines += [(f"Prepared copies are cached in `{cache['dir']}`. " if cache.get('dir') else 'Prepared copies were not kept for later runs. ')
+                  + f"The live project copies sit in `{cache.get('work')}`, the same place every run (Unity's Library holds absolute paths).", '']
+    editor = {v: ((summary.get('environments') or {}).get(v, {}).get('editor') or [{'environment': {}}])[0]['environment'].get('unityVersionFull') for v in summary['variants']}
+    primes = {r['variant']: r for r in rows if r['type'] == 'prepare'}
+    if data.get('prepared'):
+        body = []
+        for v in summary['variants']:
+            prep = data['prepared'].get(v)
+            if prep is None:
+                continue
+            prime = primes.get(v)
+            body.append([v, 'prepared: ' + prepared_text(prep), prep.get('editor') or editor.get(v) or '?',
+                         (f"{prime['wall_ms'] / 1000:.1f} s, {prime['status']}" if prime else 'not needed (reused)' if prep.get('status') == 'reused' else 'not run')])
+        lines += table(['Variant', 'Prepared copy', 'Editor', 'Untimed priming open (import)'], body)
+    if data.get('workloads'):
+        lines += ['', 'Start state of each workload (`cold`: Library deleted and global caches isolated; `warm`: restored from the snapshot of the prepared copy; `as-is`: whatever the previous process left):', '']
+        body = []
+        for g in data['workloads']:
+            restore = ''
+            if g['restore_ms_median'] is not None:
+                ok = g['verified'].get('true', 0)
+                restore = f"{', '.join(g['methods'])}, median {g['restore_ms_median']:,.0f} ms, verified {ok}/{ok + g['verified'].get('false', 0)}"
+            imports = ', '.join(str(n) for n in g['imports']) if g['imports'] else 'not in log'
+            if g['cache_server_imports']:
+                imports += f" ({g['cache_server_imports']} from a cache server)"
+            body.append([g['workload'], g['variant'], state_text(g), restore or '-', imports])
+        lines += table(['Workload', 'Variant', 'State', 'Restore', 'Assets imported at open, per process'], body)
+        changed = {(g['workload'], g['variant']): g['settings_changed'] for g in data['workloads'] if g['settings_changed']}
+        if changed:
+            lines += ['', 'The Editor rewrote its own settings files during these workloads (annotation; `warm` puts them back with the snapshot):', '']
+            lines += [f"- `{workload}` `{variant}`: {', '.join(names[:6])}{' ...' if len(names) > 6 else ''}" for (workload, variant), names in changed.items()]
+    return lines
+
+
 def render_workload(w, summary, campaign, bases):
     options = summary['options']
     resolution = options.get('resolution_ms', 0.0)
@@ -294,6 +409,7 @@ def render_host(summary, campaign, rows):
 def render(summary, campaign, rows):
     lines, variants, bases = render_header(summary, campaign)
     lines += render_variants(summary, campaign, variants)
+    lines += render_states(summary, campaign, rows)
     for w in summary['workloads']:
         lines += render_workload(w, summary, campaign, bases)
     lines += render_host(summary, campaign, rows)
@@ -317,6 +433,7 @@ def write_reports(run_dir, exclude_first_use=None, include_differing=False, boot
     summary = summarise(rows, exclude_first_use=exclude, include_differing=include_differing, baseline=defaults.get('baseline'), baselines=configured,
                         variant_order=[v for v in order if any(r['variant'] == v for r in rows)] or None, headline=headline, bootstrap=bootstrap, resolution_ms=resolution_ms)
     summary['options']['first_use_ratios'] = first_use_ratios
+    summary['states'] = states_summary(rows, campaign)
     summary['report'] = {'framework': provenance.framework(), 'options': summary['options']}
     (run_dir / 'summary.json').write_text(json.dumps(summary, indent=1, allow_nan=False), encoding='utf-8')
     (run_dir / 'summary.md').write_text(render(summary, campaign, rows), encoding='utf-8')

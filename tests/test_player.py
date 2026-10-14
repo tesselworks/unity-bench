@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
@@ -14,6 +15,7 @@ from unity_bench import config, distributions, runner, summary  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
 import fake_launcher  # noqa: E402
+import testenv  # noqa: E402,F401  (first: keeps the cache directory out of the user's real one)
 
 FAKE = str(Path(__file__).with_name('fake_unity.py'))
 
@@ -65,6 +67,9 @@ class PlayerRunnerTests(unittest.TestCase):
             self.skipTest('no .NET Framework compiler to build a fake player .exe (the runner refuses batch files)')
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)
+        patch = mock.patch.dict(os.environ, {'UNITY_BENCH_CACHE_DIR': str(self.tmp / 'cache')})
+        patch.start()
+        self.addCleanup(patch.stop)
         (self.tmp / 'proj/Assets').mkdir(parents=True)
         (self.tmp / 'proj/Assets/A.cs').write_text('class A {}\n')
 
@@ -225,9 +230,9 @@ class PlayerRunnerTests(unittest.TestCase):
         path = self.campaign([{'id': 'a', 'editor': editor()}, {'id': 'b', 'editor': editor()}], [{'id': 'w', 'kind': 'editor.warm_open', 'repeats': 1}],
                              project={'prepare': [['{python}', '{campaign}/prep.py', '{project}', '{variant}', '{root}']]})
         out, _ = self.run_campaign(path, keep_work=True)
-        text = (out / 'work/a/prepared.txt').read_text().split()
+        text = (Path(json.loads((out / 'campaign.json').read_text())['cache']['work']) / 'a/prepared.txt').read_text().split()
         self.assertEqual(text[0], 'a')
-        self.assertTrue((out / 'work/b/prepared.txt').is_file())
+        self.assertTrue((Path(json.loads((out / 'campaign.json').read_text())['cache']['work']) / 'b/prepared.txt').is_file())
         failing = self.campaign([{'id': 'a', 'editor': editor()}], [{'id': 'w', 'kind': 'editor.warm_open', 'repeats': 1}], project={'prepare': [[sys.executable, '-c', 'raise SystemExit(3)']]})
         with self.assertRaisesRegex(RuntimeError, 'exited 3'):
             self.run_campaign(failing, name='out2')
@@ -262,7 +267,7 @@ class PlayerRunnerTests(unittest.TestCase):
             request = json.loads(next((out / 'requests').glob(f'*edit-{variant}.json')).read_text())
             targets = {t['id']: t['path'] for t in request['targets']}
             self.assertEqual(targets['leaf'], 'Assets/A.cs')
-            self.assertEqual(Path(targets['core']), out / 'work' / variant / 'packages/core/Core.cs')
+            self.assertEqual(Path(targets['core']), Path(json.loads((out / 'campaign.json').read_text())['cache']['work']) / variant / 'packages/core/Core.cs')
         self.assertEqual((repo / 'packages/core/Core.cs').read_text(), 'class Core {}\n')
         subprocess.run(['git', '-C', str(repo), 'worktree', 'prune'], capture_output=True)
 

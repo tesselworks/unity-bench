@@ -216,3 +216,15 @@ A result with an unknown schema, `completed: false`, no samples (and no distribu
 ## Log markers (optional)
 
 Built-in script-edit and Play Mode workloads print `[UnityBench] begin <step> <round>` and `[UnityBench] end <step> <round>` lines to the Editor log. The runner parses `Domain Reload Profiling` and `Asset Pipeline Refresh` blocks from that log ([workloads.md](workloads.md)) and attributes each block to the step whose markers enclose it. An adapter that triggers reloads in a way the package cannot see can print the same two lines itself to get the same attribution.
+
+## What the runner adds to `results.jsonl` and `summary.json` (v0.4, additive)
+
+Adapters do not write these; consumers that read `results.jsonl` or `summary.json` see them. Result files stay `schema: 1`. Rows of a type a consumer does not know can be ignored, and none of the fields below is required.
+
+| Where | Field | Meaning |
+| --- | --- | --- |
+| `process` row | `state` | `null` for player launches; else `{requested, actual, notes, ...}`. `actual` differs from `requested` when the state could not be set up (`warm` without a snapshot runs `as-is`; `notes` say why). `cold`: `library_removed`, `isolated` (cache name -> the variable or arguments used). `warm`: `snapshot` (cache key), `restore_ms`, `restore_method` (`clonefile`, `reflink-auto`, `copy`), `verified` (restored copy matches the snapshot's manifest), `delete_retries`. Any state: `imports` (`total`, `actual`, `local_cache`, `cache_server` of the Editor's first asset refresh, from its log, when it printed one) and `settings_changed` (settings files the Editor rewrote during the process) |
+| `prepare` row (new type) | `role: "prime"`, `variant`, `key`, `status`, `error`, `exit_code`, `wall_ms`, `host`, `log` | the untimed priming open of a variant's copy; never part of a summary |
+| `campaign.json` | `cache` | `{enabled, dir, work, isolate}` |
+| `campaign.json` | `provenance.variants.<id>.prepared` | `{status: "built" or "reused", key, editor, seconds, method, built_seconds, prime_ms, rebuilt_because, note, settings_changed_by_priming, cache_dir}` |
+| `summary.json` | `states` | `{prepared: {variant: the record above}, workloads: [{workload, variant, requested, actual, snapshots, methods, restore_ms_median, verified, isolated, imports, ...}]}` |

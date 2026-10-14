@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import time
 
+from . import cache, fastcopy
+
 PACKAGE_NAME = 'com.tesselworks.unity-bench'
 SKIP_DIRS = {'Library', 'Temp', 'Logs', 'obj', 'UserSettings', '.git', 'Builds', '.vs', '.idea'}
 
@@ -59,25 +61,69 @@ def inject_package(project):
     return 'replaced the project\'s embedded copy' if replaced else 'injected'
 
 
-def create(campaign, variant, work_root):
+def target_path(work_root, variant):
+    return Path(work_root) / variant['id']
+
+
+def clear_target(target, managed=False):
+    """Make `target` free. A directory with files in it is somebody's (an earlier run's or the user's) and stops the run, unless the run owns the
+    directory (`managed`: the default work directory inside the cache, where leftovers of a killed run are ours to delete)."""
+    target = Path(target)
+    if not target.exists():
+        return
+    if managed:
+        fastcopy.remove_tree(target)
+    elif any(p.is_file() for p in target.rglob('*')):
+        raise FileExistsError(f'{target} already exists and has files in it (left behind by an earlier run?); delete it or choose another --work directory')
+    else:
+        shutil.rmtree(target, ignore_errors=True)   # only empty directories: what a surviving process kept from a finished run
+
+
+def git_blob(repo, commit, path):
+    """The bytes of `path` at `commit`, or None when the commit has no such file."""
+    done = subprocess.run(['git', '-C', str(repo), 'show', f'{commit}:{path}'], capture_output=True)
+    return done.stdout if done.returncode == 0 else None
+
+
+def source_identity(campaign, variant):
+    """What the variant's project is before anything is prepared, for the cache key: a resolved commit, or for a plain copy a digest of the
+    files (path, size, time). Also the digest of the package lock, and, for a worktree, the project's place inside the repository."""
+    source = Path(campaign['project']['path'])
+    if variant.get('revision'):
+        top = Path(git(source, 'rev-parse', '--show-toplevel')).resolve()
+        relative = source.resolve().relative_to(top).as_posix()
+        repo = Path(campaign['project']['repository'] or top)
+        commit = git(repo, 'rev-parse', '--verify', variant['revision'] + '^{commit}')
+        lock = git_blob(repo, commit, f"{relative + '/' if relative != '.' else ''}Packages/packages-lock.json")
+        return {'mode': 'worktree', 'commit': commit, 'relative': relative, 'package_lock': cache.sha(lock) if lock is not None else None}
+    tree, count = cache.stat_digest(source, SKIP_DIRS)
+    lock = source / 'Packages' / 'packages-lock.json'
+    return {'mode': 'copy', 'tree': tree, 'files': count, 'package_lock': cache.file_digest(lock) if lock.is_file() else None,
+            'commit': (git_state(source) or {}).get('commit')}
+
+
+def injected_digest(campaign):
+    return cache.tree_digest(framework_package()) if campaign['project']['inject_package'] else None
+
+
+def create(campaign, variant, work_root, commit=None, managed=False):
     """Make `<work_root>/<variant id>` and return (project directory, worktree root or None, provenance).
 
     Without `revision` the project directory is copied (minus Library/Temp/...). With one, a detached
     git worktree of that commit is used, and the project is the same relative path inside it.
     The provenance says which commit that really is (`HEAD` is resolved), whether the copy was dirty and what happened to the package.
+    `commit` is the already resolved commit to check out, so that the cache key and the checkout cannot disagree.
     """
     source = Path(campaign['project']['path'])
-    target = Path(work_root) / variant['id']
-    if target.exists():
-        if any(p.is_file() for p in target.rglob('*')):
-            raise FileExistsError(f'{target} already exists and has files in it (left behind by an earlier run?); delete it or choose another --work directory')
-        shutil.rmtree(target, ignore_errors=True)   # only empty directories: what a surviving process kept from a finished run
+    target = target_path(work_root, variant)
+    clear_target(target, managed)
     worktree = None
     info = {'revision': variant.get('revision'), 'warnings': []}
     if variant.get('revision'):
         repo = Path(campaign['project']['repository'] or git(source, 'rev-parse', '--show-toplevel'))
         relative = source.relative_to(Path(git(source, 'rev-parse', '--show-toplevel')).resolve())
-        git(repo, 'worktree', 'add', '--detach', str(target), variant['revision'])
+        subprocess.run(['git', '-C', str(repo), 'worktree', 'prune'], capture_output=True)   # a killed earlier run can leave its registration behind
+        git(repo, 'worktree', 'add', '--detach', str(target), commit or variant['revision'])
         worktree = (repo, target)
         project = target / relative
         info.update(mode='worktree', **(git_state(target) or {}))
@@ -88,6 +134,58 @@ def create(campaign, variant, work_root):
         info['warnings'] += [f'the manifest depends on {ref}, outside the project; a plain copy does not contain it' for ref in outside_references(source)]
     info['package'] = inject_package(project) if campaign['project']['inject_package'] else 'not injected'
     return project, worktree, info
+
+
+def materialize(campaign, variant, work_root, entry, managed=False):
+    """Make `<work_root>/<variant id>` from a cache entry instead of preparing it. Returns (project, worktree or None, provenance, copy result).
+
+    A worktree is registered with git again (`--no-checkout`, so git does not write the files a second time) and the snapshot's files are copied over it;
+    a plain copy is the snapshot. The provenance is the one recorded when the entry was made.
+    """
+    target = target_path(work_root, variant)
+    clear_target(target, managed)
+    meta = entry.meta
+    info = dict(meta.get('info') or {})
+    info['warnings'] = list(info.get('warnings') or [])
+    worktree = None
+    source = Path(campaign['project']['path'])
+    if meta.get('mode') == 'worktree':
+        repo = Path(campaign['project']['repository'] or git(source, 'rev-parse', '--show-toplevel'))
+        subprocess.run(['git', '-C', str(repo), 'worktree', 'prune'], capture_output=True)
+        git(repo, 'worktree', 'add', '--detach', '--no-checkout', str(target), meta['components']['source']['commit'])
+        worktree = (repo, target)
+    result = restore_root(entry.tree, target)
+    if worktree:
+        subprocess.run(['git', '-C', str(target), 'reset', '-q'], capture_output=True)   # index = HEAD, so `git status` shows what prepare changed
+    relative = meta.get('project_relative', '.')
+    return (target / relative if relative != '.' else target), worktree, info, result
+
+
+def snapshot_root(root, destination):
+    """Copy the root of a prepared copy (the project, or the checkout of a worktree) to the empty directory `destination`, without `.git`, Temp and Logs.
+    Retried: a just-exited Editor can still be releasing files on Windows."""
+    last = None
+    for attempt in range(4):
+        try:
+            if Path(destination).exists():
+                fastcopy.remove_tree(destination)
+            return fastcopy.sync_root(root, destination, skip=cache.SNAPSHOT_SKIP)
+        except OSError as error:
+            last = error
+            fastcopy.sleep(2)
+    raise OSError(f'could not snapshot {root}: {last}')
+
+
+def restore_root(snapshot, root, skip=('.git',)):
+    """Put the root of a prepared copy back to a snapshot. Returns the `sync_root` result."""
+    last = None
+    for attempt in range(3):
+        try:
+            return fastcopy.sync_root(snapshot, root, skip=skip)
+        except OSError as error:
+            last = error
+            fastcopy.sleep(2)
+    raise OSError(f'could not restore {root}: {last}')
 
 
 def remove(project_dir, worktree):
@@ -111,12 +209,10 @@ def remove(project_dir, worktree):
 
 def remove_library(project):
     """Delete Library, retrying briefly: a just-exited Editor can still be releasing files."""
-    for _ in range(5):
-        shutil.rmtree(Path(project) / 'Library', ignore_errors=True)
-        if not (Path(project) / 'Library').exists():
-            return
-        time.sleep(2)
-    raise OSError('could not delete Library')
+    try:
+        fastcopy.remove_tree(Path(project) / 'Library', attempts=5, delay=2)
+    except OSError:
+        raise OSError('could not delete Library') from None
 
 
 def snapshot(project, relative_paths):

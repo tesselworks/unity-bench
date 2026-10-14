@@ -105,7 +105,12 @@ if ours.fail:
 if ours.hang:
     time.sleep(60)
 (project / 'Library').mkdir(exist_ok=True)
-lines = ['Unity fake editor']
+opens = project / 'Library' / 'opens.txt'   # how often this Library has been opened: a restored snapshot goes back to the count it was taken with
+before = len(opens.read_text().split()) if opens.exists() else 0
+with opens.open('a') as handle:
+    handle.write('x\n')
+lines = ['Unity fake editor', f'Library opens before this launch: {before}', f'Imports: total={5 if before == 0 else 0} (actual={5 if before == 0 else 0}, local cache=0, cache server=0)']
+lines += [f'ENV {name}={os.environ.get(name, "")}' for name in ('BEE_CACHE_DIRECTORY', 'UPM_CACHE_ROOT')] + ['ARGS ' + ' '.join(unity)]
 env = {'unityVersion': 'fake-1', 'unityVersionFull': 'fake-1 (abc123)', 'runtime': 'fake runtime', 'runtimeKind': 'mono', 'codeOptimization': 'Debug', 'backend': 'Mono2x'}
 
 
