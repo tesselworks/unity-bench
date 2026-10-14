@@ -1,6 +1,9 @@
 """Per-variant project copies: where Library, edits and builds live, away from your working tree."""
 import json
+import os
 from pathlib import Path
+import posixpath
+import re
 import shutil
 import subprocess
 import time
@@ -85,9 +88,74 @@ def git_blob(repo, commit, path):
     return done.stdout if done.returncode == 0 else None
 
 
+UNITY_TOP_LEVEL = ('Assets', 'Packages', 'ProjectSettings')   # what Unity reads of a project that is the root of its repository (see `content_identity`)
+
+
+def git_object(repo, commit, path):
+    """The object id of `path` at `commit` (a tree for a directory, a blob for a file), or None when the commit has no such path."""
+    done = subprocess.run(['git', '-C', str(repo), 'rev-parse', '--verify', '--quiet', f'{commit}:{path}'], capture_output=True, text=True)
+    return done.stdout.strip() or None if done.returncode == 0 else None
+
+
+def local_package_paths(manifest_bytes):
+    """{package name: value} of the `file:` dependencies in the bytes of a `Packages/manifest.json` (none when it is missing or not JSON)."""
+    try:
+        deps = json.loads((manifest_bytes or b'{}').decode('utf-8-sig')).get('dependencies', {})
+    except (ValueError, AttributeError):
+        return {}
+    return {name: value for name, value in deps.items() if isinstance(value, str) and value.startswith('file:')}
+
+
+def content_identity(repo, commit, top, source, relative):
+    """What of the repository at `commit` the prepared copy is made from, as object ids instead of the commit's own id, so a commit that changes
+    nothing Unity reads leaves it, and the cache key, as it was:
+
+    - `project`: the git tree of the project directory (`<commit>:<relative>`); when the project is the repository root, the trees of `Assets`, `Packages` and
+      `ProjectSettings` only (the rest of the root, `.github` and the like, is not read by Unity; `UserSettings` and `Library` are not versioned).
+    - `local_packages`: for every `file:` dependency of `Packages/manifest.json`, resolved from the project's `Packages` directory, the tree (or blob, for a
+      tarball) at `commit` when it lies inside the repository, else a stat digest of what is on disk (a path outside the repository has no commit)."""
+    prefix = '' if relative == '.' else relative + '/'
+    if relative == '.':
+        project = {name: git_object(repo, commit, name) for name in UNITY_TOP_LEVEL}
+    else:
+        project = git_object(repo, commit, relative)
+    packages = {}
+    for name, value in sorted(local_package_paths(git_blob(repo, commit, prefix + 'Packages/manifest.json')).items()):
+        text = value[5:]
+        outside = None
+        if os.path.isabs(text) or re.match(r'^[A-Za-z]:', text):   # absolute: in the repository only if it points into this checkout
+            outside = Path(text).resolve()
+            try:
+                inside = outside.relative_to(top).as_posix()
+            except ValueError:
+                inside = None
+        else:
+            inside = posixpath.normpath(posixpath.join(prefix + 'Packages', text))
+            if inside == '..' or inside.startswith('../'):
+                inside = None
+        if inside is not None:
+            oid = git_object(repo, commit, inside) if inside != '.' else git(repo, 'rev-parse', f'{commit}^{{tree}}')
+            packages[name] = {'git': inside, 'id': oid}
+        else:
+            outside = outside or (source / 'Packages' / text).resolve()
+            if outside.is_dir():
+                digest, count = cache.stat_digest(outside, SKIP_DIRS)
+                packages[name] = {'outside': str(outside), 'stat': digest, 'files': count}
+            elif outside.is_file():
+                info = outside.stat()
+                packages[name] = {'outside': str(outside), 'stat': cache.sha(f'{info.st_size}\0{info.st_mtime_ns // 1_000_000}'), 'files': 1}
+            else:
+                packages[name] = {'outside': str(outside), 'stat': None}
+    return {'project': project, 'local_packages': packages}
+
+
 def source_identity(campaign, variant):
-    """What the variant's project is before anything is prepared, for the cache key: a resolved commit, or for a plain copy a digest of the
-    files (path, size, time). Also the digest of the package lock, and, for a worktree, the project's place inside the repository."""
+    """What the variant's project is before anything is prepared, for the cache key.
+
+    A worktree variant is identified by content, not by commit: the git objects of the project and of its local packages at the resolved commit (see
+    `content_identity`), the digest of the package lock, and the project's place inside the repository. The resolved `commit` is part of the record, for
+    provenance and for checking the worktree out, but `cache.components` leaves it out of the key. A plain copy is a digest of the files (path, size, time),
+    the package lock, and the commit its directory is at."""
     source = Path(campaign['project']['path'])
     if variant.get('revision'):
         top = Path(git(source, 'rev-parse', '--show-toplevel')).resolve()
@@ -95,7 +163,8 @@ def source_identity(campaign, variant):
         repo = Path(campaign['project']['repository'] or top)
         commit = git(repo, 'rev-parse', '--verify', variant['revision'] + '^{commit}')
         lock = git_blob(repo, commit, f"{relative + '/' if relative != '.' else ''}Packages/packages-lock.json")
-        return {'mode': 'worktree', 'commit': commit, 'relative': relative, 'package_lock': cache.sha(lock) if lock is not None else None}
+        return {'mode': 'worktree', 'commit': commit, 'relative': relative, 'package_lock': cache.sha(lock) if lock is not None else None,
+                **content_identity(repo, commit, top, source.resolve(), relative)}
     tree, count = cache.stat_digest(source, SKIP_DIRS)
     lock = source / 'Packages' / 'packages-lock.json'
     return {'mode': 'copy', 'tree': tree, 'files': count, 'package_lock': cache.file_digest(lock) if lock.is_file() else None,
@@ -139,8 +208,10 @@ def create(campaign, variant, work_root, commit=None, managed=False):
 def materialize(campaign, variant, work_root, entry, managed=False):
     """Make `<work_root>/<variant id>` from a cache entry instead of preparing it. Returns (project, worktree or None, provenance, copy result).
 
-    A worktree is registered with git again (`--no-checkout`, so git does not write the files a second time) and the snapshot's files are copied over it;
-    a plain copy is the snapshot. The provenance is the one recorded when the entry was made.
+    A worktree is registered with git again (`--no-checkout`, so git does not write the files a second time) at the commit the entry was made from
+    (`meta['source']['commit']`, which can be an older commit than the one this run asked for: the key is the content, see `cache.components`) and the
+    snapshot's files are copied over it; a plain copy is the snapshot. The provenance is the one recorded when the entry was made; the caller says which
+    commit this run resolved.
     """
     target = target_path(work_root, variant)
     clear_target(target, managed)
@@ -152,7 +223,7 @@ def materialize(campaign, variant, work_root, entry, managed=False):
     if meta.get('mode') == 'worktree':
         repo = Path(campaign['project']['repository'] or git(source, 'rev-parse', '--show-toplevel'))
         subprocess.run(['git', '-C', str(repo), 'worktree', 'prune'], capture_output=True)
-        git(repo, 'worktree', 'add', '--detach', '--no-checkout', str(target), meta['components']['source']['commit'])
+        git(repo, 'worktree', 'add', '--detach', '--no-checkout', str(target), meta['source']['commit'])
         worktree = (repo, target)
     result = restore_root(entry.tree, target)
     if worktree:

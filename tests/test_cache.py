@@ -117,6 +117,127 @@ class FastCopyTests(unittest.TestCase):
         self.assertTrue(text.endswith('a'))
 
 
+def git_in(repo, *args):
+    return subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@t', *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def write(base, name, text):
+    path = Path(base) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding='utf-8')
+
+
+class ContentKeyTests(unittest.TestCase):
+    """A worktree variant is keyed by what its project and local packages contain at the commit, not by the commit."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.variant = {'id': 'a', 'backend': 'mono', 'build': {}, 'revision': 'HEAD'}
+        self.editor = {'full': '7000.0.0a7 (581996e1a8f7)'}
+
+    def layout(self, relative, package):
+        """A repository with the Unity project at `relative` and a local package at `package` (relative to the repository), referenced with `file:`."""
+        repo = self.tmp / 'repo'
+        self.project = repo if relative == '.' else repo / relative
+        prefix = '' if relative == '.' else relative + '/'
+        reference = os.path.relpath(repo / package, self.project / 'Packages').replace(os.sep, '/')
+        write(repo, prefix + 'Assets/A.cs', 'class A {}\n')
+        write(repo, prefix + 'ProjectSettings/ProjectVersion.txt', 'm_EditorVersion: 7000.0.0a7\n')
+        write(repo, prefix + 'Packages/manifest.json', json.dumps({'dependencies': {'com.unity.modules.ui': '1.0.0', 'com.example.core': 'file:' + reference}}))
+        write(repo, package + '/package.json', '{"name": "com.example.core"}\n')
+        write(repo, package + '/Runtime/Core.cs', 'class Core {}\n')
+        write(repo, 'README.md', 'readme\n')
+        write(repo, '.github/workflows/ci.yml', 'name: ci\n')
+        git_in(repo, 'init', '-q')
+        self.commit('first')
+        self.repo, self.prefix = repo, prefix
+
+    def commit(self, message):
+        git_in(self.tmp / 'repo', 'add', '-A')
+        git_in(self.tmp / 'repo', 'commit', '-q', '-m', message)
+
+    def change(self, name, text):
+        write(self.repo, name, text)
+        self.commit('change ' + name)
+
+    def key(self):
+        campaign = {'project': {'path': str(self.project), 'repository': None, 'prepare': [], 'prepare_inputs': [], 'campaign_dir': str(self.tmp)}}
+        identity = workspace.source_identity(campaign, self.variant)
+        parts, _ = cache.components(campaign, self.variant, '/work/a', identity, self.editor, None)
+        return cache.key_of(parts), identity
+
+    def test_a_commit_that_changes_nothing_unity_reads_keeps_the_key_in_a_subdirectory_project(self):
+        self.layout('unity/Proj', 'packages/core')
+        before, identity = self.key()
+        self.change('.github/x.yml', 'name: other\n')
+        self.change('README.md', 'a new readme\n')
+        self.change('packages/unrelated/Other.cs', 'class Other {}\n')     # another package of the repository, not referenced by the project
+        self.change('src/Tool.cs', 'class Tool {}\n')
+        after, now = self.key()
+        self.assertEqual(after, before)
+        self.assertNotEqual(now['commit'], identity['commit'])             # the commit is still recorded for provenance
+        self.assertEqual((now['mode'], now['relative']), ('worktree', 'unity/Proj'))
+
+    def test_a_change_in_the_project_or_its_local_package_changes_the_key(self):
+        self.layout('unity/Proj', 'packages/core')
+        seen = {'start': self.key()[0]}
+        for name, text in (('unity/Proj/Assets/A.cs', 'class A { int x; }\n'),
+                           ('unity/Proj/Assets/New/B.cs', 'class B {}\n'),
+                           ('unity/Proj/ProjectSettings/ProjectVersion.txt', 'm_EditorVersion: 7000.0.0a8\n'),
+                           ('unity/Proj/Packages/manifest.json', json.dumps({'dependencies': {'com.example.core': 'file:../../../packages/core', 'com.unity.modules.ui': '1.0.1'}})),
+                           ('packages/core/Runtime/Core.cs', 'class Core { int y; }\n'),
+                           ('packages/core/package.json', '{"name": "com.example.core", "version": "2"}\n')):
+            self.change(name, text)
+            key = self.key()[0]
+            self.assertNotIn(key, seen.values(), name)
+            seen[name] = key
+
+    def test_a_package_the_manifest_no_longer_names_stops_counting(self):
+        self.layout('unity/Proj', 'packages/core')
+        write(self.repo, 'unity/Proj/Packages/manifest.json', json.dumps({'dependencies': {'com.unity.modules.ui': '1.0.0'}}))
+        self.commit('drop the local package')
+        before = self.key()[0]
+        self.change('packages/core/Runtime/Core.cs', 'class Core { int y; }\n')
+        self.assertEqual(self.key()[0], before)
+
+    def test_a_project_at_the_root_of_the_repository_only_counts_assets_packages_and_project_settings(self):
+        self.layout('.', 'local/core')
+        before, identity = self.key()
+        self.assertEqual(sorted(identity['project']), ['Assets', 'Packages', 'ProjectSettings'])
+        self.change('.github/workflows/ci.yml', 'name: changed\n')
+        self.change('README.md', 'changed\n')
+        self.change('docs/notes.md', 'new\n')
+        self.assertEqual(self.key()[0], before)
+        for name, text in (('Assets/A.cs', 'class A { int x; }\n'), ('ProjectSettings/ProjectVersion.txt', 'm_EditorVersion: 7000.0.0a8\n'),
+                           ('local/core/Runtime/Core.cs', 'class Core { int y; }\n')):
+            self.change(name, text)
+            key = self.key()[0]
+            self.assertNotEqual(key, before, name)
+            before = key
+
+    def test_a_local_package_outside_the_repository_is_keyed_by_its_files_on_disk(self):
+        self.layout('unity/Proj', 'packages/core')
+        outside = self.tmp / 'elsewhere/pkg'
+        write(outside, 'package.json', '{"name": "com.example.out"}\n')
+        write(self.repo, 'unity/Proj/Packages/manifest.json', json.dumps({'dependencies': {'com.example.out': 'file:../../../../elsewhere/pkg'}}))
+        self.commit('depend on a package outside the repository')
+        before, identity = self.key()
+        self.assertIn('stat', identity['local_packages']['com.example.out'])
+        self.assertEqual(self.key()[0], before)
+        write(outside, 'Runtime/New.cs', 'class New {}\n')
+        self.assertNotEqual(self.key()[0], before)
+
+    def test_a_tarball_package_is_keyed_by_its_blob(self):
+        self.layout('unity/Proj', 'packages/core')
+        write(self.repo, 'vendor/x.tgz', 'v1')
+        write(self.repo, 'unity/Proj/Packages/manifest.json', json.dumps({'dependencies': {'com.example.x': 'file:../../../vendor/x.tgz'}}))
+        self.commit('tarball')
+        before = self.key()[0]
+        self.change('vendor/x.tgz', 'v2')
+        self.assertNotEqual(self.key()[0], before)
+
+
 class KeyTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -124,7 +245,7 @@ class KeyTests(unittest.TestCase):
         (self.tmp / 'prep.py').write_text('print(1)\n')
         self.project = {'prepare': [['{python}', '{campaign}/prep.py', '--project', '{project}']], 'prepare_inputs': [], 'campaign_dir': str(self.tmp)}
         self.variant = {'id': 'a', 'backend': 'mono', 'build': {}}
-        self.identity = {'mode': 'worktree', 'commit': 'c' * 40, 'relative': 'unity', 'package_lock': 'l1'}
+        self.identity = {'mode': 'worktree', 'commit': 'c' * 40, 'relative': 'unity', 'package_lock': 'l1', 'project': 't1', 'local_packages': {'core': {'git': 'packages/core', 'id': 'p1'}}}
         self.editor = {'full': '7000.0.0a7 (581996e1a8f7)'}
 
     def key(self, project=None, variant=None, identity=None, editor=None, injected='p1', target='/work/a'):
@@ -136,7 +257,8 @@ class KeyTests(unittest.TestCase):
         base = self.key()
         self.assertEqual(base, self.key())
         changed = {
-            'commit': self.key(identity={**self.identity, 'commit': 'd' * 40}),
+            'project content': self.key(identity={**self.identity, 'project': 't2'}),
+            'local package content': self.key(identity={**self.identity, 'local_packages': {'core': {'git': 'packages/core', 'id': 'p2'}}}),
             'lock': self.key(identity={**self.identity, 'package_lock': 'l2'}),
             'editor': self.key(editor={'full': '7000.0.0a8 (aaaaaaaaaaaa)'}),
             'backend': self.key(variant={**self.variant, 'backend': 'il2cpp'}),
@@ -148,6 +270,11 @@ class KeyTests(unittest.TestCase):
         self.assertEqual(len(set(changed.values()) | {base}), len(changed) + 1, changed)
         (self.tmp / 'prep.py').write_text('print(2)\n')   # the script a command names is part of the key
         self.assertNotEqual(self.key(), base)
+
+    def test_the_commit_of_a_worktree_is_provenance_and_not_part_of_the_key(self):
+        self.assertEqual(self.key(identity={**self.identity, 'commit': 'd' * 40}), self.key())
+        copy = {'mode': 'copy', 'tree': 'f' * 64, 'files': 3, 'package_lock': None, 'commit': 'c' * 40}
+        self.assertNotEqual(self.key(identity={**copy, 'commit': 'd' * 40}), self.key(identity=copy))   # a plain copy is as it was
 
     def test_prepare_inputs_files_and_directories_are_hashed_and_the_variant_only_when_used(self):
         (self.tmp / 'adapters').mkdir()
@@ -482,6 +609,42 @@ class CampaignCacheTests(unittest.TestCase):
         self.assertEqual([self.opens(out2, r) for r in self.processes(rows, 'warm')], [1, 1])
         self.assertTrue(all(r['status'] == 'ok' for r in rows if r['type'] == 'process'))
         subprocess.run(['git', '-C', str(repo), 'worktree', 'remove', '--force', str(work)], capture_output=True)
+        subprocess.run(['git', '-C', str(repo), 'worktree', 'prune'], capture_output=True)
+
+    def test_a_worktree_copy_is_reused_across_commits_that_leave_the_project_alone_and_reports_the_new_commit(self):
+        repo = self.tmp / 'repo'
+        make_tree(repo / 'unity')
+        git = lambda *a: git_in(repo, *a)  # noqa: E731
+        git('init', '-q')
+        git('add', '-A')
+        git('commit', '-q', '-m', 'x')
+        first = git('rev-parse', 'HEAD')
+        cfg = {'name': 'fake', 'project': {'path': 'repo/unity'}, 'defaults': {'repeats': 1, 'rounds': 1}, 'variants': [{'id': 'wt', 'editor': editor(), 'revision': 'HEAD'}],
+               'workloads': [{'id': 'warm', 'kind': 'editor.warm_open', 'state': 'warm'}]}
+        path = self.tmp / 'wt.json'
+        path.write_text(json.dumps(cfg))
+
+        def prepared(out):
+            return json.loads((out / 'campaign.json').read_text())['provenance']['variants']['wt']
+
+        out, _ = self.run_campaign(path, name='r1')
+        self.assertEqual(prepared(out)['prepared']['status'], 'built')
+        (repo / '.github').mkdir()
+        (repo / '.github/ci.yml').write_text('name: ci\n')
+        git('add', '-A')
+        git('commit', '-q', '-m', 'workflow only')
+        second = git('rev-parse', 'HEAD')
+        out, rows = self.run_campaign(path, name='r2')
+        info = prepared(out)
+        self.assertEqual((info['prepared']['status'], info['commit'], info['prepared_from_commit']), ('reused', second, first))   # this run's commit is the one reported
+        self.assertTrue(all(r['status'] == 'ok' for r in rows if r['type'] == 'process'))
+        self.assertIn(second[:12], (out / 'summary.md').read_text())
+        (repo / 'unity/Assets/A.cs').write_text('class A { int changed; }\n')
+        git('add', '-A')
+        git('commit', '-q', '-m', 'a script')
+        out, _ = self.run_campaign(path, name='r3')
+        self.assertEqual(prepared(out)['prepared']['status'], 'built')
+        self.assertNotIn('prepared_from_commit', prepared(out))
         subprocess.run(['git', '-C', str(repo), 'worktree', 'prune'], capture_output=True)
 
     def test_the_default_work_directory_is_stable_and_a_user_one_is_still_protected(self):
