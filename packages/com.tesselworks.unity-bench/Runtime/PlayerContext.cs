@@ -77,7 +77,7 @@ namespace UnityBench.Player
     {
         internal sealed class Sample
         {
-            public string Name, Phase, Hash, WorkGroup;
+            public string Name, Phase, Hash, WorkGroup, Unit;
             public double Ms;
             public int Round;
             public Dictionary<string, double> Counters;
@@ -85,7 +85,7 @@ namespace UnityBench.Player
 
         internal sealed class Distribution
         {
-            public string Name, Phase, Hash, WorkGroup;
+            public string Name, Phase, Hash, WorkGroup, Unit;
             public double[] Values;
             public Dictionary<string, double> Counters;
         }
@@ -157,6 +157,18 @@ namespace UnityBench.Player
             var list = new List<double>();
             foreach (var v in values) list.Add(v);
             AddDistribution(name, phase, list, work, workGroup);
+        }
+
+        // The built-in scene workload reports values that are not times (bytes, counts); `unit` is "ms", "bytes" or "count".
+        internal void AddValues(string name, string phase, List<double> values, string unit, string workGroup)
+        {
+            Distributions.Add(new Distribution { Name = name, Phase = phase, Values = values.ToArray(), Unit = unit, WorkGroup = workGroup });
+        }
+
+        internal void AddValue(string name, double value, string unit, string workGroup)
+        {
+            Add(name, value, null, null, workGroup);
+            Samples[Samples.Count - 1].Unit = unit;
         }
 
         /// <summary>Starts recording frame times; call <see cref="FrameRecorder.Stop"/> to end the phase and report it.</summary>

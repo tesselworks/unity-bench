@@ -5,7 +5,7 @@ from pathlib import Path
 
 from . import provenance
 from .stats import RESOLUTION_MS, chance_separation
-from .summary import read_rows, summarise
+from .summary import SCENE_KINDS, read_rows, summarise
 
 ROUNDS_KINDS = ('editor.script_edit', 'editor.play', 'editor.adapter', 'player.build_time', 'player.adapter')   # kinds where `rounds` means something
 
@@ -20,21 +20,39 @@ def ms(value):
     return f'{value:,.0f}'
 
 
-def cell(stats, count=False, resolution=0.0):
+def size(value):
+    """Bytes as B / KB / MB / GB (1024)."""
+    for unit in ('B', 'KB', 'MB'):
+        if abs(value) < 1024:
+            return f'{value:,.0f} B' if unit == 'B' else f'{value:.1f} {unit}'
+        value /= 1024
+    return f'{value:.2f} GB'
+
+
+def amount(value, unit='ms'):
+    """A value in the unit its item reports: milliseconds (default), bytes, or a plain count."""
+    if unit == 'bytes':
+        return size(value)
+    if unit == 'count':
+        return f'{value:,.0f}' if value >= 100 or value == int(value) else ms(value)
+    return ms(value)
+
+
+def cell(stats, count=False, resolution=0.0, unit='ms'):
     if not stats:
         return 'no data'
     if count:
         return f"{stats['median']:g} [{stats['min']:g}-{stats['max']:g}] n={stats['n']}"
-    median = '<res' if stats['median'] < resolution else ms(stats['median'])
-    return f"{median} [{ms(stats['min'])}-{ms(stats['max'])}] n={stats['n']}"
+    median = '<res' if unit == 'ms' and stats['median'] < resolution else amount(stats['median'], unit)
+    return f"{median} [{amount(stats['min'], unit)}-{amount(stats['max'], unit)}] n={stats['n']}"
 
 
-def ratio_cell(r):
+def ratio_cell(r, unit='ms'):
     """The ratio, whether the process ranges separate, and n on each side (a separation among two or three processes happens by chance)."""
     if not r:
         return '-'
     if r['ratio'] is None:
-        return '<res'
+        return '<res' if unit == 'ms' else 'baseline 0'
     return f"{r['ratio']:.2f} (ranges {'overlap' if r['ranges_overlap'] else 'separate'}, n={r['n'][0]} vs {r['n'][1]})"
 
 
@@ -62,12 +80,12 @@ def coverage_text(coverage):
     return ', '.join(f'{v} {r}/{t}' for v, (r, t) in coverage.items())
 
 
-def work_cell(item, compared, bases):
+def work_cell(item, compared, bases, unreported='not reported'):
     status = item['identity']['status']
     if status == 'identical':
         return 'same'
     if status == 'unreported':
-        return 'not reported'
+        return unreported
     if status == 'partial':
         return f"partial ({coverage_text(item['identity']['coverage'])})"
     parts = []   # differs somewhere, but not in every compared pair
@@ -299,6 +317,8 @@ def render_workload(w, summary, campaign, bases):
         lines += ['Samples by phase: ' + ', '.join(f'{p} {n}' for p, n in sorted(seen['phases'].items())) +
                   ('. `single`: measured once per process, so neither first-use nor claimed to be warm.' if 'single' in seen['phases'] else '.'), '']
     compared = [v for v in w['variants'] if bases[v] != v]
+    if w['kind'] in SCENE_KINDS:
+        lines += scene_notes(w)
     if w['items']:
         boot = bool(options.get('bootstrap'))
         header = ['Item', *[v + (' (A)' if v == summary['baseline'] else '') for v in w['variants']], *[f'{v}/{bases[v]}' for v in compared],
@@ -309,9 +329,10 @@ def render_workload(w, summary, campaign, bases):
             for v in compared:
                 differs = item.get('pair_work', {}).get(v) == 'differs'
                 pair_cells.append('work differs' if differs and not options.get('include_differing')
-                                  else ratio_cell(item['ratios'].get(v)) + (' [work differs]' if differs else ''))
+                                  else ratio_cell(item['ratios'].get(v), item.get('unit', 'ms')) + (' [work differs]' if differs else ''))
             intervals = [(lambda ci: f'{ci[0]:.2f}-{ci[1]:.2f}' if ci else '-')((item.get('bootstrap') or {}).get(v)) for v in compared] if boot else []
-            body.append([item['name'], *[cell(item['variants'].get(v), resolution=resolution) for v in w['variants']], *pair_cells, *intervals, work_cell(item, compared, bases)])
+            body.append([item['name'], *[cell(item['variants'].get(v), resolution=resolution, unit=item.get('unit', 'ms')) for v in w['variants']], *pair_cells, *intervals,
+                         work_cell(item, compared, bases, 'not verified' if w['kind'] in SCENE_KINDS else 'not reported')])
         lines += table(header, body)
         sizes = sorted({tuple(r['n']) for item in w['items'] for r in item['ratios'].values() if r})
         if sizes:
@@ -342,7 +363,8 @@ def render_workload(w, summary, campaign, bases):
         lines += ['', f"**{len(w['differing'])} item(s) did different work or produced different output in every compared pair, or varied within a variant. They are excluded from the table and from any aggregate.** "
                   'Their timings are shown here for diagnosis only; a ratio between different work is not a speed comparison.', '']
         lines += table(['Item', 'Why', 'Values', *[f'{v}/{bases[v]}' for v in compared]],
-                       [[i['name'], i['identity']['detail'], describe_fingerprints(i['identity']['values']), *[ratio_cell(i['diagnostic_ratios'].get(v)) for v in compared]] for i in w['differing']])
+                       [[i['name'], i['identity']['detail'], describe_fingerprints(i['identity']['values']), *[ratio_cell(i['diagnostic_ratios'].get(v), i.get('unit', 'ms')) for v in compared]]
+                        for i in w['differing']])
     if options.get('first_use_ratios') and w['first_use_ratios']:
         lines += ['', 'First-use samples as ratios (one per process; the first time something runs in a process: JIT, caches, first scene, first import):', '']
         lines += table(['Item', *w['variants'], *[f'{v}/{bases[v]}' for v in compared]],
@@ -367,6 +389,19 @@ def render_workload(w, summary, campaign, bases):
     return lines
 
 
+def scene_notes(w):
+    """What a scene workload knew about its work, and which profiler markers each variant had."""
+    if w.get('work_verified'):
+        lines = ["Work verified: the scene reported work counters or a hash through `Bench.Mark` / `Bench.Hash`, compared per item in the Work column.", '']
+    else:
+        lines = ["Work not verified: the scene made no `Bench.Mark` or `Bench.Hash` call, so nothing says that the variants did the same work "
+                 "(see Scene hooks in docs/adapters.md).", '']
+    if w.get('markers'):
+        lines += table(['Variant', 'Profiler markers recorded', 'Not available here'],
+                       [[v, ', '.join(m['recorded']) or 'none', ', '.join(m['missing']) or 'none'] for v, m in w['markers'].items()]) + ['']
+    return lines
+
+
 def render_aggregate(w, bases, compared):
     """Aggregates exist for headline items only; say so when a workload has none."""
     lines = []
@@ -388,8 +423,9 @@ def render_host(summary, campaign, rows):
         lines += ['Machine CPU is whole-machine utilisation while the process ran. "Other" CPU is approximate: machine CPU minus the CPU time of the launched process tree, '
                   'sampled once a second, so a process that starts and ends between two samples is missed and "other" can be over-stated. The one-second series of every process '
                   'is in `results.jsonl`. Nothing was refused or discarded because of any of it.', '']
-        lines += table(['Variant', 'Processes', 'Machine CPU median / max %', 'Other CPU (approx.) median / max %', 'Memory max %'],
-                       [[v, h['processes'], f"{h['machine_cpu_median']:.0f} / {h['machine_cpu_max']:.0f}", f"{h['other_cpu_median']:.0f} / {h['other_cpu_max']:.0f}", f"{h['memory_percent_max']:.0f}"] for v, h in summary['host'].items()])
+        lines += table(['Variant', 'Processes', 'Machine CPU median / max %', 'Other CPU (approx.) median / max %', 'Memory max %', 'Process tree RSS max (sampled)'],
+                       [[v, h['processes'], f"{h['machine_cpu_median']:.0f} / {h['machine_cpu_max']:.0f}", f"{h['other_cpu_median']:.0f} / {h['other_cpu_max']:.0f}", f"{h['memory_percent_max']:.0f}",
+                         size(h['tree_rss_max_mb'] * 2**20) if h.get('tree_rss_max_mb') else '-'] for v, h in summary['host'].items()])
     else:
         lines.append('Not recorded (install psutil to record CPU and memory).')
     host = campaign.get('host') or {}

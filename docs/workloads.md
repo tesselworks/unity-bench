@@ -14,6 +14,8 @@ Common workload keys: `id`, `kind`, `repeats` (fresh processes per variant), `ro
 | `player.build_time` | stopwatch around `BuildPipeline.BuildPlayer` | `build` | clean or incremental |
 | `player.startup` | file timestamp from outside the player | `launch_to_probe`, `engine_to_probe`, `launch_to_exit` | launches a built player |
 | `player.adapter` | the adapter's own | the adapter's | see [adapters.md](adapters.md#player-adapter-playeradapter) |
+| `player.scene` | frames in the player | `frame`, profiler markers, GC and memory, custom segments | plays a scene with no project code, see [below](#playerscene-and-editorscene_play) |
+| `editor.scene_play` | frames in Play Mode | the same | the same collection in the Editor |
 
 ## Start state (`state`)
 
@@ -137,6 +139,54 @@ These replace the v0.2 names `first_frame`, `first_frame_in_player` and `process
 With `unity-bench run --only`, a workload that names a `build` pulls that build workload in (once). A `build` workload must be defined before the workloads that use it.
 
 Without `build`, the runner builds the player once per variant before the first launch (a later `player.startup` or `player.adapter` with the same backend, scenes, `development`, `build_target` and `prebuild` runs the same build); that build is stored as a process record with `role: setup-build` and is not part of any summary.
+
+## player.scene and editor.scene_play
+
+Play one scene of the project and record how it runs. Nothing in the project has to change: the package's runtime part (inert unless the process was started by the runner) loads the scene, waits out a warm-up, then records for the duration. `player.scene` builds the player once per variant (the build holds exactly this scene, `development` and `backend` as for the other player workloads, shared with any workload that has the same settings) and launches `repeats` fresh processes. `editor.scene_play` opens the scene in the batchmode Editor and records in Play Mode; it takes `state` like the other Editor workloads.
+
+```toml
+[[workloads]]
+id = "main-scene"
+kind = "player.scene"                       # or editor.scene_play
+scene = "Assets/Scenes/Main.unity"          # required, project-relative
+warmup_seconds = 2                          # or warmup_frames; default 2 s
+duration_seconds = 10                       # or duration_frames; default 10 s
+time = { capture_delta = 0.016667, fixed_timestep = 0.02 }   # optional
+vsync = false                               # default false: vSyncCount 0 and no frame-rate cap while recording; true keeps the project's setting
+headless = false                            # player only; default a 1280x800 window (window = "1280x800"); true = -batchmode -nographics
+list_markers = false                        # true: store every profiler recorder the player offers in the process notes (markers.catalog), for diagnosis
+repeats = 5
+```
+
+- Give each of warm-up and duration in seconds **or** frames, not both. Seconds are real time, so variants that run faster simulate more frames. For work you want to compare, use `duration_frames`.
+- `time.capture_delta` sets `Time.captureDeltaTime`: game time then advances by this fixed step per frame whatever the real frame time is, so every variant simulates the same frames. `time.fixed_timestep` sets `Time.fixedDeltaTime`. Both are put back when the run ends. Frame times stay real wall-clock times either way.
+- `headless = false` is the default for the player: a headless player has no rendering, so there are no rendering markers.
+
+### What is recorded
+
+Everything is a per-frame series of the steady phase (the warm-up is excluded), reduced per process to `p50`, `p95`, `p99` and `max` like any [distribution](adapters.md#distributions), so the items are named `<metric> steady p50` and so on. Values have a unit (`ms`, `bytes`, `count`), shown in the table.
+
+| Item | Source | Unit |
+| --- | --- | --- |
+| `frame warmup ...`, `frame steady ...` | wall time between two frames | ms |
+| `Main Thread`, `PlayerLoop`, `Update.ScriptRunBehaviourUpdate`, `FixedUpdate.PhysicsFixedUpdate`, `Physics.Simulate`, `Physics2D.Simulate`, `Culling`, `Camera.Render`, `RenderLoop`, `Gfx.WaitForPresentOnGfxThread`, `Gfx.WaitForRenderThread`, `GC.Alloc`, `GC.Collect` | `ProfilerRecorder` marker, summed over the frame | ms |
+| `SetPass Calls Count`, `Triangles Count`, `Vertices Count`, `GC Allocation In Frame Count` | `ProfilerRecorder` counter of the frame | count |
+| `GC Allocated In Frame` | `ProfilerRecorder` counter of the frame | bytes |
+| `GC Used Memory`, `GC Reserved Memory`, `Total Used Memory`, `App Resident Memory` | `ProfilerRecorder` level at each frame | bytes |
+| `GC Allocated In Frame steady total`, `GC Allocation In Frame Count steady total` | sum over the steady phase | bytes, count |
+| `GC collections gen0 steady` (and gen1, gen2) | `GC.CollectionCount` change over the steady phase (managed, so it exists on every backend) | count |
+| `process peak working set` | the player's own `PeakWorkingSet64` at the end, when the platform gives one | bytes |
+| `segment <name> steady ...` | `Bench.Begin/End` calls in the game, one value per call | ms |
+
+A marker or counter that this Editor, player or backend does not offer is **not an error**: the recorders are looked up in the list `ProfilerRecorderHandle.GetAvailable` returns, and the missing ones are listed per variant in the report ("Not available here") and in the process notes (`markers.recorded`, `markers.missing`, `markers.offered`). What a Release player lists is much shorter than the Editor's list: see the table in [methodology](methodology.md#profiler-markers-per-backend). A zero-time marker prints `<res`; a zero baseline has no ratio (`baseline 0`).
+
+The Editor's batchmode Play Mode never closes profiler frames, so the recorders there keep accumulating; the runtime then takes the change since the previous frame, which is the same quantity. In a player the recorder's own per-frame samples are used.
+
+Also stored: the process's host RSS (sampled once a second, a lower bound of the peak), and as notes the frames and seconds of the steady phase, the clock settings and which hooks the scene called.
+
+### Work: verified or not
+
+The frames and markers say how the scene ran, not that two variants ran the same scene. Without hook calls from the game the report labels every item **work not verified**. When the game calls `Bench.Mark`, `Bench.Hash` (see [Scene hooks](adapters.md#scene-hooks)), those counters and hash become the scene's work identity, attached to every item of the workload, and the Work column reads `same` / `differs` / `partial` like for adapters. Add the calls later and the same workload becomes verified; no workload has to be rewritten as an adapter.
 
 ## Preparing the project copy
 

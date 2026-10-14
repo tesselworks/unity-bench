@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tesselworks-unity-bench"
-version = "0.4.0"
+version = "0.5.0"
 description = "Compare Unity Editors and player backends on the same project with a fixed A/B schedule and per-process medians"
 readme = "README.md"
 license = { text = "MIT" }

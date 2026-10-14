@@ -33,12 +33,12 @@ def chance_separation(a, b):
 def compare(base, other, resolution=RESOLUTION_MS):
     """Ratio other/base of the two medians-of-process-medians, the n of each side, and whether the process ranges overlap.
 
-    A median below `resolution` on either side has no meaningful ratio: the result says `below_resolution` and has `ratio` None.
+    A median below `resolution` on either side has no meaningful ratio: the result says `below_resolution` and has `ratio` None, and so has a zero baseline.
     """
     if not base or not other:
         return None
     n = [base['n'], other['n']]
-    if base['median'] < resolution or other['median'] < resolution:
+    if base['median'] <= 0 or base['median'] < resolution or other['median'] < resolution:
         return {'ratio': None, 'below_resolution': True, 'n': n}
     separated = other['max'] < base['min'] or base['max'] < other['min']
     return {'ratio': other['median'] / base['median'], 'ranges_overlap': not separated, 'n': n, 'chance_separated': chance_separation(*n)}

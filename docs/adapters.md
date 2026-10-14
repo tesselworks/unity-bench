@@ -150,6 +150,37 @@ A sample or distribution with a `workGroup` and no hash or counters of its own *
 
 A soak or a long Play Mode run has thousands of frame times, and a median hides the stalls. An adapter reports them as one **distribution** per phase instead of one sample each (`AddDistribution` and `RecordFrames` in the player, `AddDistribution` in `AdapterContext` for Editor adapters). The runner reduces each distribution, per process, to four samples named `<name> <phase> p50`, `p95`, `p99` and `max` (nearest-rank percentiles), and the summary does the usual: median across processes of those values, range, ratio. Use different phase names for different periods, `warmup` and `steady` for example, and they appear as separate items, so a slow start is visible instead of averaged away. The raw frame times stay in the process's file under `results/`. A distribution's `hash` and `counters` (or its work group's) are attached to all four of its items, so work that differs excludes all four. The phase label is the samples' phase when it is `first-use`, `warmup` or `steady`, and `warm` for any other label. The summary never mixes statistics: `steady p95` and `steady p50` are different families, and so are `warmup` and `steady`.
 
+## Scene hooks
+
+A scene workload ([`player.scene`, `editor.scene_play`](workloads.md#playerscene-and-editorscene_play)) needs no code. These static calls, in the package's runtime assembly `UnityBench.Player` (namespace `UnityBench.Player`, class `Bench`), let the game add what only it knows. They do nothing unless the process was started by Unity Bench, so they can stay in the game.
+
+```csharp
+using UnityBench.Player;
+
+void Start()
+{
+    Bench.Mark("bodies", bodies);              // a work counter; the last value under a name counts
+    Bench.Hash("layout", LayoutText());        // an output fingerprint (also Hash(name, byte[]))
+}
+
+void Update()
+{
+    Bench.Begin("fracture");                   // times a piece of the game's own code, any number of calls
+    Fracture();
+    Bench.End("fracture");
+}
+```
+
+| Call | Effect |
+| --- | --- |
+| `Bench.Mark(counter, value)` | a work counter, compared between variants. Anything that depends on the number of frames (a count of updates) is only comparable with a fixed `duration_frames` |
+| `Bench.Hash(name, text)` / `Hash(name, bytes)` | an output fingerprint; all names together are the scene's hash |
+| `Bench.Begin(segment)` / `Bench.End(segment)` | one timed call of a segment; calls that end in the steady phase appear as `segment <name> steady p50/p95/p99/max` (ms, one value per call). Calls may nest and repeat; an `End` without a `Begin` is ignored |
+
+With at least one `Mark` or `Hash`, the scene reports a work group `scene` (the counters and the combined hash) that **every item of the workload inherits**: the Work column reads `same` when the variants agree, a run that did different work withholds all of its ratios together, and a variant that did not make the calls is `partial`. Without any, the report says "work not verified". Segments alone do not verify work. The name `Bench` (not `UnityBench`) is because the namespace `UnityBench` already exists, and a class of that name could not be called from game code.
+
+A game project that does not always have the package should guard the calls: give its assembly definition a `versionDefines` entry (`"name": "com.tesselworks.unity-bench", "define": "UNITY_BENCH"`) and wrap the calls in `#if UNITY_BENCH`, or keep them in one small file that is excluded the same way.
+
 ## The result file
 
 The runner passes a request file (`-unityBenchRequest`, written by the runner, read by the package) and the package writes a result file. You normally do not write this by hand; this is the schema, for anyone implementing an adapter in another language or runtime.
@@ -198,13 +229,14 @@ The runner passes a request file (`-unityBenchRequest`, written by the runner, r
 | `environment` | object or null | free-form strings. The report shows `unityVersion`/`unityVersionFull`, `runtime`, `runtimeKind`, `codeOptimization`, `backend`, `development`, `platform`, `graphicsDevice` |
 | `samples[].name` | string | the item identity inside the workload |
 | `samples[].phase` | `"first-use"`, `"warm"`, `"warmup"`, `"steady"`, or null/absent | absent: the runner derives it ([Phases](#phases)). First-use samples are excluded from the steady-state summary by default |
-| `samples[].ms` | number >= 0, finite | the metric |
+| `samples[].ms` | number >= 0, finite | the metric, in `unit` (milliseconds when `unit` is absent) |
+| `samples[].unit` | `"ms"`, `"bytes"`, `"count"`, or null/absent | (v0.5, additive) what `ms` holds. Bytes and counts have no timer resolution, so a zero is a value and a zero baseline has no ratio |
 | `samples[].round` | int | informational; reload log blocks are matched to steps by the log markers below |
 | `samples[].hash` | string or null | output hash; compared across variants and repeats |
 | `samples[].counters` | object of finite numbers | work counters; compared like the hash |
 | `samples[].workGroup` | string or null | a key of `workGroups`; the sample inherits its hash and counters when it has none of its own |
 | `samples[].info` | object | annotations (assemblies compiled, reloaded...). Never compared |
-| `distributions` | list, optional | `name`, `phase` (any label), `values` (list of numbers >= 0, in ms), optional `hash`, `counters`, `workGroup`. Expanded to four samples as described above |
+| `distributions` | list, optional | `name`, `phase` (any label), `values` (list of numbers >= 0, in ms or in `unit`), optional `hash`, `counters`, `workGroup`, `unit`. Expanded to four samples as described above |
 | `workGroups` | object, optional | name -> `{ "hash": string or null, "counters": { name: finite number } }` |
 | `headline` | list of strings, optional | item-name patterns (`*`, `?`) of the headline items |
 | `notes` | object | process-level annotations (`player.build_time` adds `build.*`: the build settings it used) |
@@ -228,3 +260,11 @@ Adapters do not write these; consumers that read `results.jsonl` or `summary.jso
 | `campaign.json` | `cache` | `{enabled, dir, work, isolate}` |
 | `campaign.json` | `provenance.variants.<id>.prepared` | `{status: "built" or "reused", key, editor, seconds, method, built_seconds, prime_ms, rebuilt_because, note, settings_changed_by_priming, cache_dir}` |
 | `summary.json` | `states` | `{prepared: {variant: the record above}, workloads: [{workload, variant, requested, actual, snapshots, methods, restore_ms_median, verified, isolated, imports, ...}]}` |
+
+### Added in v0.5 (additive)
+
+| Where | Field | Meaning |
+| --- | --- | --- |
+| `sample` row, `summary.json` item | `unit` | `"bytes"` or `"count"` when the value is not milliseconds (absent = ms); the item also carries `unit` (`"ms"` default) |
+| `summary.json` workload | `work_verified`, `markers` | scene workloads only: whether any item reported work identity; per variant `{recorded, missing, processes}` profiler markers |
+| `process` row `host`, `summary.json` `host` | `tree_rss_max_mb`, `series.tree_rss_mb` | resident memory of the launched process tree, sampled once a second (needs psutil) |

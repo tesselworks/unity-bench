@@ -12,6 +12,8 @@ import tomllib
 from . import states
 
 BUILD_KEYS = {'development', 'scene', 'scenes', 'build_target', 'backend', 'prebuild'}   # what decides which player a workload gets
+SCENE_KEYS = {'duration_seconds', 'duration_frames', 'warmup_seconds', 'warmup_frames', 'time', 'vsync', 'list_markers'}   # the scene workloads' run: what and for how long
+TIME_KEYS = {'capture_delta', 'fixed_timestep'}
 KINDS = {
     'editor.cold_open': {'description': 'Delete Library, open the project in batchmode, quit.'},
     'editor.warm_open': {'description': 'Open the project in batchmode with its Library, quit.'},
@@ -21,7 +23,11 @@ KINDS = {
     'player.build_time': {'description': 'BuildPipeline.BuildPlayer wall time.', 'keys': BUILD_KEYS | {'mode'}},
     'player.startup': {'description': 'Launch a built player until its first frame.', 'keys': BUILD_KEYS | {'build', 'headless', 'window', 'player_args', 'startup_timeout_seconds'}},
     'player.adapter': {'description': 'Run a project C# adapter inside a built player.', 'keys': BUILD_KEYS | {'build', 'method', 'args', 'headless', 'window', 'player_args'}},
+    'editor.scene_play': {'description': 'Play a scene in the Editor and record frames, markers, GC and memory.', 'keys': {'scene'} | SCENE_KEYS},
+    'player.scene': {'description': 'Play a scene in a built player and record frames, markers, GC and memory.',
+                     'keys': (BUILD_KEYS - {'scenes'}) | SCENE_KEYS | {'headless', 'window', 'player_args'}},
 }
+SCENE_KINDS = ('editor.scene_play', 'player.scene')
 COMMON_KEYS = {'id', 'kind', 'repeats', 'rounds', 'timeout_seconds', 'variants', 'headline'}
 VARIANT_KEYS = {'id', 'editor', 'unity_version', 'backend', 'code_optimization', 'revision', 'baseline', 'build'}
 BUILD_SETTING_KEYS = ('api_compatibility', 'il2cpp_code_generation', 'stripping')   # player build settings a campaign may hold equal across Editors
@@ -196,12 +202,39 @@ def check_kind(w):
         w.setdefault('domain_reload', 'default')
         require(w['domain_reload'] in ('default', 'disabled'), f'workload {wid}: domain_reload must be default or disabled')
         w.setdefault('scene', None)
+    elif kind in SCENE_KINDS:
+        check_scene(w)
     elif kind in ('editor.adapter', 'player.adapter'):
         require(isinstance(w.get('method'), str) and re.fullmatch(r'[\w.]+\.\w+', w['method']), f'workload {wid}: method must be Namespace.Type.Method')
         args = w.setdefault('args', {})
         require(isinstance(args, dict) and all(isinstance(k, str) and isinstance(v, (str, int, float, bool)) for k, v in args.items()), f'workload {wid}: args must be a flat table')
     if kind.startswith('player.'):
         check_player(w)
+
+
+def check_scene(w):
+    """The scene, how long to warm up and record, and the optional clock settings of a scene workload."""
+    wid = w['id']
+    require(isinstance(w.get('scene'), str) and w['scene'].endswith('.unity') and project_relative(w['scene']), f'workload {wid}: scene must be a project-relative .unity file')
+    for what, default in (('duration', 10), ('warmup', 2)):
+        seconds, frames = f'{what}_seconds', f'{what}_frames'
+        require(seconds not in w or frames not in w, f'workload {wid}: give {seconds} or {frames}, not both')
+        if frames in w:
+            require(type(w[frames]) is int and (w[frames] > 0 if what == 'duration' else w[frames] >= 0), f'workload {wid}.{frames} must be a {"positive" if what == "duration" else "non-negative"} integer')
+        else:
+            w.setdefault(seconds, default)
+            require(isinstance(w[seconds], (int, float)) and not isinstance(w[seconds], bool) and (w[seconds] > 0 if what == 'duration' else w[seconds] >= 0),
+                    f'workload {wid}.{seconds} must be a {"positive" if what == "duration" else "non-negative"} number')
+    clock = w.setdefault('time', {})
+    require(isinstance(clock, dict), f'workload {wid}: time must be a table')
+    unknown(clock, TIME_KEYS, f'workload {wid} time')
+    for key, value in clock.items():
+        require(isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1, f'workload {wid}.time.{key} must be a number of seconds in (0, 1]')
+    w.setdefault('vsync', False)
+    w.setdefault('list_markers', False)
+    require(isinstance(w['vsync'], bool) and isinstance(w['list_markers'], bool), f'workload {wid}: vsync and list_markers must be booleans')
+    if w['kind'] == 'player.scene':
+        w['scenes'] = [w['scene']]   # the build holds exactly this scene
 
 
 def check_player(w):

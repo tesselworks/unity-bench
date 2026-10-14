@@ -37,7 +37,7 @@ class Sampler:
     """
 
     def __init__(self):
-        self.cpu, self.tree, self.memory = [], [], []
+        self.cpu, self.tree, self.memory, self.rss = [], [], [], []
         self.load = os.getloadavg()[0] if hasattr(os, 'getloadavg') else None
         self._procs, self._times = {}, {}
         self._last = time.monotonic()
@@ -53,7 +53,7 @@ class Sampler:
             # Everything is read before anything is stored, so the three series stay aligned even when a lookup fails.
             cpu, memory = psutil.cpu_percent(None), psutil.virtual_memory().percent
             root = self._procs.get(pid) or self._procs.setdefault(pid, psutil.Process(pid))
-            used = 0.0
+            used, resident = 0.0, 0
             for proc in [root, *root.children(recursive=True)]:
                 try:
                     times = proc.cpu_times()
@@ -62,12 +62,17 @@ class Sampler:
                 total = times.user + times.system
                 used += total - self._times.get(proc.pid, 0.0)
                 self._times[proc.pid] = total
+                try:
+                    resident += proc.memory_info().rss
+                except psutil.Error:
+                    pass   # resident size is an extra; a process that denies it still counts for CPU
             tree = min(100.0, 100.0 * used / elapsed / (os.cpu_count() or 1))
         except psutil.Error:
             return  # the process may have just exited; a missing sample is not an error
         self.cpu.append(cpu)
         self.memory.append(memory)
         self.tree.append(tree)
+        self.rss.append(resident)
 
     def summary(self):
         if not psutil:
@@ -77,7 +82,8 @@ class Sampler:
         if self.cpu:
             out.update(machine_cpu_median=round(statistics.median(self.cpu), 1), machine_cpu_max=round(max(self.cpu), 1),
                        other_cpu_median=round(statistics.median(other), 1), other_cpu_max=round(max(other), 1),
-                       memory_percent_max=round(max(self.memory), 1),
+                       memory_percent_max=round(max(self.memory), 1), tree_rss_max_mb=round(max(self.rss) / 2**20, 1),   # resident set of the process tree, sampled once a second
                        series={'interval_s': INTERVAL_SECONDS, 'machine_cpu': [round(x, 1) for x in self.cpu],
-                               'tree_cpu': [round(x, 1) for x in self.tree], 'memory_percent': [round(x, 1) for x in self.memory]})
+                               'tree_cpu': [round(x, 1) for x in self.tree], 'memory_percent': [round(x, 1) for x in self.memory],
+                               'tree_rss_mb': [round(x / 2**20, 1) for x in self.rss]})
         return out

@@ -9,12 +9,13 @@ import json
 import re
 import statistics
 
+from .config import SCENE_KINDS
 from .identity import identity, pair_identity
 from .stats import RESOLUTION_MS, bootstrap_ratio, compare, describe, geomean, process_medians
 
 RELOAD_PHASES = ['total', 'BeginReloadAssembly', 'LoadAllAssembliesAndSetupDomain', 'TypeCache.ScanAssembly',
                  'FinalizeReload', 'ProcessInitializeOnLoadAttributes']
-PLAYER_KINDS = ('player.startup', 'player.adapter')
+PLAYER_KINDS = ('player.startup', 'player.adapter', 'player.scene')
 QUANTILE = re.compile(r' (\S+ (?:p50|p95|p99|max))$')   # "frame steady p95": the statistic of a distribution, as the runner names its items
 ENVIRONMENT_KEYS = ('unityVersion', 'unityVersionFull', 'runtime', 'runtimeKind', 'codeOptimization', 'backend', 'development', 'platform', 'graphicsDevice', 'batchMode')
 
@@ -69,11 +70,12 @@ def summarise(rows, exclude_first_use=True, include_differing=False, baseline=No
             # Work is judged per compared pair: Unity 7 IL2CPP and CoreCLR can do the same work as each other but not as 6.7.
             judged = {v: pair_identity(item_samples, base_of[v], v) for v in compared}
             pair_work = {v: j[0] for v, j in judged.items()}
-            diagnostic = {v: compare(per_variant.get(base_of[v]), per_variant.get(v), resolution_ms) for v in compared}
+            unit = next((s['unit'] for s in item_samples if s.get('unit')), 'ms')   # bytes and counts have no timer resolution
+            diagnostic = {v: compare(per_variant.get(base_of[v]), per_variant.get(v), resolution_ms if unit == 'ms' else 0.0) for v in compared}
             same_somewhere = ident['status'] != 'differs' or any(w != 'differs' for w in pair_work.values())
             ratios = diagnostic if include_differing or ident['status'] != 'differs' else {v: (r if pair_work[v] != 'differs' else None) for v, r in diagnostic.items()}
             quantile = QUANTILE.search(name)
-            row = {'name': name, 'variants': per_variant, 'identity': ident, 'pair_work': pair_work, 'pair_coverage': {v: j[1] for v, j in judged.items()},
+            row = {'name': name, 'unit': unit, 'variants': per_variant, 'identity': ident, 'pair_work': pair_work, 'pair_coverage': {v: j[1] for v, j in judged.items()},
                    'phases': sorted({s['phase'] for s in steady}), 'info': info_summary(steady, entry['variants']), 'ratios': ratios, 'diagnostic_ratios': diagnostic,
                    'family': quantile.group(1) if quantile else None, 'headline': is_headline(name, declared),
                    'work_groups': sorted({s['work_group'] for s in item_samples if s.get('work_group')})}
@@ -94,6 +96,9 @@ def summarise(rows, exclude_first_use=True, include_differing=False, baseline=No
         entry['aggregate'] = aggregate(entry['items'], compared, base_of)
         entry['headline_items'] = sum(1 for i in entry['items'] if i['headline'])
         entry['observed'] = observed(mine, mine_processes, entry['variants'])
+        if entry['kind'] in SCENE_KINDS:
+            entry['work_verified'] = any(i['identity']['status'] != 'unreported' for i in entry['items'] + entry['differing'])
+            entry['markers'] = markers(mine_processes, entry['variants'])
         entry['reload'] = reload_table(workload, reloads, entry['variants'], exclude_first_use)
         out['workloads'].append(entry)
     out['host'] = host_summary(processes)
@@ -107,6 +112,17 @@ def observed(samples, processes, variants):
     return {'processes': {v: sum(1 for p in processes if p['variant'] == v and p['status'] == 'ok' and not p.get('role')) for v in variants},
             'samples_per_item': [min(plain.values()), max(plain.values())] if plain else None,
             'phases': dict(Counter(s['phase'] for s in samples))}
+
+
+def markers(processes, variants):
+    """Per variant, which profiler markers the scene workload recorded and which this player or Editor did not have (the process notes `markers.recorded` and `markers.missing`)."""
+    out = {}
+    for v in variants:
+        mine = [p.get('notes') or {} for p in processes if p['variant'] == v and p['status'] == 'ok']
+        found = {key: sorted({x for n in mine for x in n.get(key, '').split(', ') if x}) for key in ('markers.recorded', 'markers.missing')}
+        if mine:
+            out[v] = {'recorded': found['markers.recorded'], 'missing': found['markers.missing'], 'processes': len(mine)}
+    return out
 
 
 def environments(processes):
@@ -229,5 +245,6 @@ def host_summary(processes):
                       'machine_cpu_max': max(h['machine_cpu_max'] for h in hosts),
                       'other_cpu_median': statistics.median(h['other_cpu_median'] for h in hosts),
                       'other_cpu_max': max(h['other_cpu_max'] for h in hosts),
-                      'memory_percent_max': max(h['memory_percent_max'] for h in hosts)}
+                      'memory_percent_max': max(h['memory_percent_max'] for h in hosts),
+                      'tree_rss_max_mb': max((h.get('tree_rss_max_mb') or 0 for h in hosts), default=0)}
     return out

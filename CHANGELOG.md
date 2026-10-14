@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0
+
+Scene workloads: measure how a project's scene runs in a built player or in Play Mode without writing an adapter, and grow into verified work with a few hook calls (tesselworks/unity-bench#7). Philosophy unchanged: annotate, do not refuse; a profiler marker a player does not offer is listed, not an error.
+
+### New
+
+- **`player.scene`** (`scene`, `warmup_seconds`/`warmup_frames`, `duration_seconds`/`duration_frames`, `time = { capture_delta, fixed_timestep }`, `vsync`, `list_markers`, plus the player keys `development`, `backend`, `headless`, `window`, `player_args`). The player is built once per variant and scene and launched `repeats` times. Inside it the package's runtime records the frame time series (warm-up and steady, p50/p95/p99/max), `ProfilerRecorder` markers and counters (main thread, PlayerLoop, physics, scripts, rendering, GC.Alloc/GC.Collect, allocation bytes and count per frame, GC and total memory, resident memory), managed GC collection counts, the process's peak working set, and custom segments.
+- **`editor.scene_play`**: the same collection in the Editor in Play Mode (batchmode). It takes `state` like the other Editor workloads.
+- **Which markers exist is recorded**: recorders are looked up in `ProfilerRecorderHandle.GetAvailable`; the report lists per variant what was recorded and what this Editor, player or backend did not offer ("Not available here"). `list_markers = true` stores the full list. See [methodology](docs/methodology.md#profiler-markers-per-backend) for what Unity 6.7 and 7 offer on macOS.
+- **Hooks for game code** (`UnityBench.Player.Bench`): `Mark(counter, value)`, `Hash(name, text | bytes)`, `Begin(segment)` / `End(segment)`. Marks and hashes become the scene's work identity, inherited by every item, so the Work column reads `same` / `differs` / `partial`; segments are reported per call as `segment <name> steady p50...`. All calls are no-ops outside Unity Bench. Without them the report says **work not verified** (it said "not reported" for adapters, which is unchanged). The class is `Bench`, not `UnityBench`, because the namespace `UnityBench` already exists.
+- **Units**: samples and distributions may carry `unit` (`ms` default, `bytes`, `count`). The report formats bytes as KB/MB/GB and counts plainly; a zero baseline has no ratio (`baseline 0`) instead of failing, and `<res` only applies to milliseconds. Result files stay `schema: 1` (additive, see [adapters.md](docs/adapters.md#the-result-file)).
+- **Resident memory of the process tree** is sampled with the host CPU (`tree_rss_max_mb` and a one-second series, a lower bound of the peak) and shown in the host table.
+- Example: the example project now lists `com.unity.modules.physics` in its manifest, and `examples/minimal-unity/Assets/Scenes/Bodies.unity` (rigidbodies and per-frame garbage; no Unity Bench call) and `BodiesHooked.unity` (the same with `Bench.Mark` / `Begin` / `End`), with four campaign entries in `examples/minimal.toml`.
+
+### Behaviour that changes
+
+- `package.json` is now versioned with the framework (0.5.0). The Editor assembly references the runtime assembly (`UnityBench.Player`) for `editor.scene_play`.
+
 ## 0.4.0
 
 Cache control: named start states, snapshots, and prepared project copies that survive between campaigns and runs (tesselworks/unity-bench#6). Philosophy unchanged: annotate, do not refuse; a state that cannot be set up is recorded and the process runs anyway.
