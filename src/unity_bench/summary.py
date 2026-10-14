@@ -11,12 +11,13 @@ import statistics
 
 from .config import SCENE_KINDS
 from .identity import identity, pair_identity
-from .stats import RESOLUTION_MS, bootstrap_ratio, compare, describe, geomean, process_medians
+from .stats import RESOLUTION_MS, bootstrap_ratio, compare, describe, geomean, linear_fit, process_medians
 
 RELOAD_PHASES = ['total', 'BeginReloadAssembly', 'LoadAllAssembliesAndSetupDomain', 'TypeCache.ScanAssembly',
                  'FinalizeReload', 'ProcessInitializeOnLoadAttributes']
 PLAYER_KINDS = ('player.startup', 'player.adapter', 'player.scene')
 QUANTILE = re.compile(r' (\S+ (?:p50|p95|p99|max))$')   # "frame steady p95": the statistic of a distribution, as the runner names its items
+MEMORY_PREFIX, LEAK_PREFIX = 'mem/', 'leak/'   # item names of the memory readings (once per process: mem/<start|end|peak>/<name>) and of a series (leak/<name>, one per reload, round = its index)
 ENVIRONMENT_KEYS = ('unityVersion', 'unityVersionFull', 'runtime', 'runtimeKind', 'codeOptimization', 'backend', 'development', 'platform', 'graphicsDevice', 'batchMode')
 
 
@@ -51,13 +52,14 @@ def summarise(rows, exclude_first_use=True, include_differing=False, baseline=No
         mine = [s for s in samples if s['workload'] == workload]
         mine_processes = [p for p in processes if p['workload'] == workload]
         entry = {'workload': workload, 'kind': mine_processes[0]['kind'], 'variants': [v for v in variants if any(p['variant'] == v for p in mine_processes)],
-                 'items': [], 'differing': [], 'first_use': [], 'first_use_ratios': [], 'reload': []}
+                 'items': [], 'differing': [], 'first_use': [], 'first_use_ratios': [], 'reload': [], 'memory': [], 'leak': []}
         chosen = (headline or {}).get(workload)
         declared = True if chosen is True else list(chosen or []) + [x for p in mine_processes for x in p.get('headline') or []]
         compared = [v for v in entry['variants'] if base_of[v] != v]
         by_name = {}
         for s in mine:
-            by_name.setdefault(s['name'], []).append(s)
+            if not s['name'].startswith(LEAK_PREFIX):   # a leak series is fitted per process below, not summarised as one item
+                by_name.setdefault(s['name'], []).append(s)
         for name, item_samples in by_name.items():
             steady = [s for s in item_samples if not (exclude_first_use and s['phase'] == 'first-use')]
             first = [s for s in item_samples if s['phase'] == 'first-use']
@@ -82,7 +84,10 @@ def summarise(rows, exclude_first_use=True, include_differing=False, baseline=No
             if bootstrap:
                 row['bootstrap'] = {v: bootstrap_ratio(per_variant[base_of[v]]['values'], per_variant[v]['values'], bootstrap)
                                     for v, r in ratios.items() if r and r['ratio'] is not None}
-            target = entry['differing'] if not same_somewhere and not include_differing else entry['items']
+            memory = name.startswith(MEMORY_PREFIX) and not row['headline']   # a memory reading is an annotation unless the campaign marks it as headline
+            if memory:
+                row['ratios'] = diagnostic
+            target = entry['memory'] if memory else entry['differing'] if not same_somewhere and not include_differing else entry['items']
             if per_variant or ident['status'] == 'differs':
                 target.append(row)
             for v in entry['variants']:
@@ -100,6 +105,10 @@ def summarise(rows, exclude_first_use=True, include_differing=False, baseline=No
             entry['work_verified'] = any(i['identity']['status'] != 'unreported' for i in entry['items'] + entry['differing'])
             entry['markers'] = markers(mine_processes, entry['variants'])
         entry['reload'] = reload_table(workload, reloads, entry['variants'], exclude_first_use)
+        entry['leak'] = leak_table(mine, entry['variants'])
+        entry['memory_counters'] = memory_counters(mine_processes, entry['variants'])
+        entry['snapshots'] = [{'variant': p['variant'], 'index': p['index'], 'result': (p.get('notes') or {})['memory.snapshot']} for p in mine_processes
+                              if p['status'] == 'ok' and (p.get('notes') or {}).get('memory.snapshot')]   # a .snap path in the run directory, or why none was taken
         out['workloads'].append(entry)
     out['host'] = host_summary(processes)
     out['environments'] = environments(processes)
@@ -108,10 +117,56 @@ def summarise(rows, exclude_first_use=True, include_differing=False, baseline=No
 
 def observed(samples, processes, variants):
     """What was actually measured, not what the campaign asked for: finished processes per variant, samples per item and process, phases."""
+    samples = [s for s in samples if not s['name'].startswith((MEMORY_PREFIX, LEAK_PREFIX))]   # readings, not rounds of the workload
     plain = Counter((s['index'], s['name']) for s in samples if 'frames' not in s['info'])   # distributions are many executions, not rounds
     return {'processes': {v: sum(1 for p in processes if p['variant'] == v and p['status'] == 'ok' and not p.get('role')) for v in variants},
             'samples_per_item': [min(plain.values()), max(plain.values())] if plain else None,
             'phases': dict(Counter(s['phase'] for s in samples))}
+
+
+def memory_counters(processes, variants):
+    """Per variant, which memory counters the Editor or player offered and which of the ones the workload asks for it did not (the process notes `memory.offered`, `memory.missing`)."""
+    out = {}
+    for v in variants:
+        mine = [p.get('notes') or {} for p in processes if p['variant'] == v and p['status'] == 'ok' and not p.get('role')]   # not the Editor that built the player
+        found = {key: sorted({x for n in mine for x in str(n.get(key, '')).split(', ') if x}) for key in ('memory.offered', 'memory.missing')}
+        if found['memory.offered'] or found['memory.missing']:
+            out[v] = {'offered': found['memory.offered'], 'missing': found['memory.missing'], 'processes': len(mine)}
+    return out
+
+
+def leak_table(samples, variants):
+    """Per counter and variant: first and last reading of a series, and its least-squares slope per reload (or Play Mode cycle) with the residual range.
+
+    Each process is fitted on its own (the process is the unit of repeat); the table takes the median of the processes' values and the range of their slopes.
+    `tail_slope` is the slope of the second half of the series, which leaves out start-up growth that has not settled yet.
+    """
+    series = {}
+    for s in samples:
+        if s['name'].startswith(LEAK_PREFIX):
+            series.setdefault((s['name'][len(LEAK_PREFIX):], s['variant'], s['index']), []).append((s['round'], s['ms'], s.get('unit') or 'bytes'))
+    rows = []
+    for name in dict.fromkeys(k[0] for k in series):
+        cells, unit = {}, 'bytes'
+        for v in variants:
+            fits = []
+            for (n, variant, _), points in series.items():
+                if n != name or variant != v:
+                    continue
+                points.sort()
+                xs, ys, unit = [p[0] for p in points], [p[1] for p in points], points[0][2]
+                fit, tail = linear_fit(xs, ys), linear_fit(xs[len(xs) // 2:], ys[len(xs) // 2:])
+                if fit:
+                    fits.append({'first': ys[0], 'last': ys[-1], 'slope': fit['slope'], 'tail_slope': tail['slope'] if tail else None,
+                                 'residual': [fit['residual_min'], fit['residual_max']], 'points': len(points)})
+            if fits:
+                tails = [f['tail_slope'] for f in fits if f['tail_slope'] is not None]
+                cells[v] = {'processes': len(fits), 'points': fits[0]['points'], 'first': statistics.median(f['first'] for f in fits), 'last': statistics.median(f['last'] for f in fits),
+                            'slope': statistics.median(f['slope'] for f in fits), 'slope_range': [min(f['slope'] for f in fits), max(f['slope'] for f in fits)],
+                            'tail_slope': statistics.median(tails) if tails else None,
+                            'residual': [min(f['residual'][0] for f in fits), max(f['residual'][1] for f in fits)]}
+        rows.append({'name': name, 'unit': unit, 'cells': cells})
+    return rows
 
 
 def markers(processes, variants):

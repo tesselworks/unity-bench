@@ -525,12 +525,12 @@ class StateConfigTests(unittest.TestCase):
 
     def test_defaults_keep_the_behaviour_of_each_kind(self):
         raw = self.base()
-        raw['workloads'] = [{'id': k.replace('.', '-'), 'kind': k, **({'targets': [{'id': 't', 'path': 'Assets/A.cs'}]} if k == 'editor.script_edit' else {}),
+        raw['workloads'] = [{'id': k.replace('.', '-'), 'kind': k, **({'targets': [{'id': 't', 'path': 'Assets/A.cs'}]} if k in ('editor.script_edit', 'editor.reload_leak') else {}),
                              **({'method': 'A.B.C'} if k == 'editor.adapter' else {}), **({'scene': 'Assets/S.unity'} if k == 'editor.scene_play' else {})} for k in states.STATE_KINDS]
         cfg = config.validate(raw, '/base')
         self.assertEqual({w['kind']: w['state'] for w in cfg['workloads']},
                          {'editor.cold_open': 'cold', 'editor.warm_open': 'as-is', 'editor.script_edit': 'as-is', 'editor.play': 'as-is', 'editor.adapter': 'as-is', 'editor.scene_play': 'as-is',
-                          'player.build_time': 'as-is'})
+                          'editor.reload_leak': 'as-is', 'editor.play_leak': 'as-is', 'player.build_time': 'as-is'})
         self.assertEqual(cfg['cache']['isolate'], ['compilation', 'upm', 'accelerator'])
         self.assertEqual(cfg['project']['prepare_inputs'], [])
 

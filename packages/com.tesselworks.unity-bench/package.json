@@ -1,6 +1,6 @@
 {
   "name": "com.tesselworks.unity-bench",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "displayName": "Unity Bench",
   "description": "Batch entry and adapter API for Unity Bench: built-in Editor workloads (script edit, Play Mode, player build), Editor adapters, and a player-side adapter runtime.",
   "unity": "6000.0",

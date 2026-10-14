@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.0
+
+Editor memory: a breakdown on every Editor process, and workloads that ask whether an Editor keeps growing when the same code is reloaded again and again (tesselworks/unity-bench#15). Philosophy unchanged: annotate, do not refuse; a counter an Editor does not offer is listed, not an error.
+
+### New
+
+- **Memory breakdown (managed heap / Unity native / graphics / process)** on every Editor process that runs a built-in workload through the package, and on `player.scene` / `editor.scene_play`. Sampled at the start, at the end and at the peak of the measured part, from the `ProfilerRecorder` Memory counters, the `Profiler` API (as a cross-check), the .NET GC (`GC.GetGCMemoryInfo`, `GetTotalAllocatedBytes`, `GetTotalPauseDuration` by reflection, because Mono's class library lacks them) and the loaded assemblies and `AssemblyLoadContext`s; and, from the runner for every process including opens and player launches, the peak RSS of the Editor and of its process tree (psutil). The report shows it as a table with variant ratios and lists, per variant, the counters the Editor did not offer. Annotations only: a campaign can promote items with `headline = ["mem/end/*"]`. `memory = false` on a workload turns the in-process readings off. See [methodology](docs/methodology.md#memory-counters) for what each counter is, forced-collection and used/reserved caveats, and which counters Mono and CoreCLR Editors offer (verified).
+- **`editor.reload_leak`** (`targets`, `rounds` default 30, `force_gc`, `memory_snapshot`): N script edit + reload cycles in one Editor with the `editor.script_edit` machinery (including the restore step after an `api` edit), memory read after each reload after a documented forced collection (`GC.Collect`, `WaitForPendingFinalizers`, `GC.Collect`, `EditorUtility.UnloadUnusedAssetsImmediate`). **`editor.play_leak`** (`rounds` default 10, `domain_reload`, `scene`): the same for Play Mode enter/exit cycles. The report gives per counter the first and last reading, the least-squares slope per cycle (MB), the slope of the second half, the residual range and the points behind it; every counter is in `summary.json` under `leak`. Their reload breakdown from the Editor log is reported as for `editor.script_edit`.
+- **Memory Profiler snapshot** (`memory_snapshot = true`): a `.snap` at the end of the process in `<run dir>/snapshots/`, if the project has `com.unity.memoryprofiler`; otherwise the process records why none was taken and carries on.
+- `stats.linear_fit`, `host_sampling` records the Editor process alone (`root_rss_max_mb`) and the tree's private memory (`tree_private_max_mb`, where the OS gives it).
+- Example: `examples/minimal.toml` has `reload-leak` and `play-leak` entries.
+
+### Behaviour that changes
+
+- Editor workloads now read memory by default (`memory = true`): a few readings per process, about four a second of cheap calls (Profiler API, .NET GC) plus a full reading at every step boundary. This adds `mem/...` samples to those workloads' results and a memory section to the report; nothing already reported changes. `memory = false` removes it.
+- `package.json` and the framework are 0.6.0. The Editor assembly gains `MemoryProbe` (in the runtime assembly) and `BatchMemory.cs`.
+- Verified on macOS, Apple silicon, example project: both Editors offer the same 33 Memory counters and the Profiler API; Mono lacks `GC.GetGCMemoryInfo`, `GetTotalAllocatedBytes`, `GetTotalPauseDuration` and `AssemblyLoadContext`.
+
 ## 0.5.0
 
 Scene workloads: measure how a project's scene runs in a built player or in Play Mode without writing an adapter, and grow into verified work with a few hook calls (tesselworks/unity-bench#7). Philosophy unchanged: annotate, do not refuse; a profiler marker a player does not offer is listed, not an error.

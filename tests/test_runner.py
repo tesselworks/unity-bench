@@ -223,7 +223,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual((copy['commit'], copy['mode'], copy['dirty_files']), (head, 'copy', 1))
         self.assertEqual(wt['package'], "replaced the project's embedded copy")
         framework = record['provenance']['framework']
-        self.assertEqual(framework['version'], '0.5.0')
+        self.assertEqual(framework['version'], '0.6.0')
         self.assertTrue(framework['commit'] is None or isinstance(framework['commit'], str))
         for variant in ('wt', 'copy'):
             package = work_dir(out) / variant / ('unity/' if variant == 'wt' else '') / 'Packages' / workspace.PACKAGE_NAME
@@ -258,7 +258,7 @@ class RunnerTests(unittest.TestCase):
         from unity_bench.report import write_reports
         s = write_reports(out, include_differing=True, bootstrap=50, first_use_ratios=True)
         self.assertEqual(s['options'], {'exclude_first_use': True, 'include_differing': True, 'bootstrap': 50, 'resolution_ms': 0.001, 'first_use_ratios': True})
-        self.assertEqual(s['report']['framework']['version'], '0.5.0')
+        self.assertEqual(s['report']['framework']['version'], '0.6.0')
         md = (out / 'summary.md').read_text()
         self.assertIn('--include-differing --first-use-ratios --bootstrap 50', md)
         self.assertIn('95% CI (bootstrap)', md)

@@ -44,6 +44,18 @@ def compare(base, other, resolution=RESOLUTION_MS):
     return {'ratio': other['median'] / base['median'], 'ranges_overlap': not separated, 'n': n, 'chance_separated': chance_separation(*n)}
 
 
+def linear_fit(xs, ys):
+    """Least-squares line through the points: its slope per x, intercept, and the smallest and largest residual (y - fitted). None for fewer than two distinct x."""
+    n = len(xs)
+    if n < 2 or len(set(xs)) < 2:
+        return None
+    mx, my = statistics.fmean(xs), statistics.fmean(ys)
+    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs)
+    intercept = my - slope * mx
+    residuals = [y - (intercept + slope * x) for x, y in zip(xs, ys)]
+    return {'slope': slope, 'intercept': intercept, 'residual_min': min(residuals), 'residual_max': max(residuals), 'n': n}
+
+
 def geomean(ratios):
     return math.exp(statistics.fmean(math.log(r) for r in ratios))
 

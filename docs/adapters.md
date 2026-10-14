@@ -261,6 +261,17 @@ Adapters do not write these; consumers that read `results.jsonl` or `summary.jso
 | `campaign.json` | `provenance.variants.<id>.prepared` | `{status: "built" or "reused", key, editor, seconds, method, built_seconds, prime_ms, rebuilt_because, note, settings_changed_by_priming, cache_dir}` |
 | `summary.json` | `states` | `{prepared: {variant: the record above}, workloads: [{workload, variant, requested, actual, snapshots, methods, restore_ms_median, verified, isolated, imports, ...}]}` |
 
+### Added in v0.6 (additive)
+
+| Where | Field | Meaning |
+| --- | --- | --- |
+| sample names | `mem/<start\|end\|peak>/<counter>`, `leak/<counter>` | memory readings (unit `bytes`, `count` or `ms`; once per process, or once per reload / Play Mode cycle with `round` = its index). The summary does not list them as items: `mem/` ones go to a memory table as annotations unless a `headline` pattern matches them, `leak/` ones are fitted per process. An adapter that wants this treatment can emit samples with these names; any other name is an ordinary item |
+| process notes | `memory.offered`, `memory.missing`, `memory.forced_gc`, `memory.snapshot` | the Memory-category counters the process offered (`name (unit)`, comma separated), the counters it was asked for and lacked, what was run before each reading of a series, and the `.snap` path or why none was taken |
+| request file | `memory`, `memorySnapshot`, `forceGc`, `snapshotPath` | for the Editor workloads, from the workload's `memory`, `memory_snapshot`, `force_gc` |
+| `sample` row | `mem/peak/Process RSS (runner)`, `mem/peak/Process tree RSS (runner)`, `mem/peak/Process tree Private (runner)` | peak memory of the launched process, of its tree and of the tree's private memory as psutil saw it, written by the runner for every process (unit `bytes`) |
+| `process` row `host`, `summary.json` `host` | `root_rss_max_mb`, `tree_private_max_mb` | the launched process alone; the tree's private memory (Windows private bytes, Linux unique set size; absent where the OS does not give it) |
+| `summary.json` workload | `memory`, `leak`, `memory_counters`, `snapshots` | the `mem/` items (same shape as `items`); per counter `{name, unit, cells: {variant: {first, last, slope, slope_range, tail_slope, residual, points, processes}}}` (slope per reload in the counter's unit); per variant `{offered, missing, processes}`; per process the snapshot path or reason |
+
 ### Added in v0.5 (additive)
 
 | Where | Field | Meaning |

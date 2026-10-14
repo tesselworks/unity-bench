@@ -70,6 +70,25 @@ id = "play-no-domain-reload"
 kind = "editor.play"
 domain_reload = "disabled"       # Enter Play Mode options: Reload Domain off
 
+# Memory. Every Editor workload above also reads its process's memory (start, end, peak) and the report shows it as a table; `memory = false` turns that off.
+# The leak workloads edit a script and reload N times (or enter and leave Play Mode N times) in ONE Editor and read memory after each cycle, after a forced
+# collection. The report gives first and last value and the slope per cycle (MB) per counter. `rounds` here is the number of cycles (defaults: 30 and 10).
+[[workloads]]
+id = "reload-leak"
+kind = "editor.reload_leak"
+targets = [{ id = "leaf", path = "Assets/FeatureA/FeatureA.cs", change = "comment" }]   # as editor.script_edit
+rounds = 30
+repeats = 2
+# force_gc = false             # read without collecting first
+# memory_snapshot = true       # a Memory Profiler .snap at the end (needs com.unity.memoryprofiler in the project; recorded as skipped without it)
+
+[[workloads]]
+id = "play-leak"
+kind = "editor.play_leak"
+rounds = 10
+repeats = 2
+domain_reload = "default"        # or "disabled"
+
 [[workloads]]
 id = "hash-adapter"
 kind = "editor.adapter"

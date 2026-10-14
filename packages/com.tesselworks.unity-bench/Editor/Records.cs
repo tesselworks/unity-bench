@@ -25,12 +25,14 @@ namespace UnityBench.Editor
         public string apiCompatibility = "", il2cppCodeGeneration = "", stripping = "";             // player.build_time, "" = keep the project's setting
         public List<string> scenes = new List<string>();
         public bool development;
+        public bool memory = true, memorySnapshot, forceGc = true;   // memory readings at start, end and peak; a Memory Profiler snapshot at the end; a forced collection before leak readings
+        public string snapshotPath = "";
     }
 
     [Serializable]
     class SampleRecord
     {
-        public string name, phase, hash, workGroup;
+        public string name, phase, hash, workGroup, unit;   // unit: "" = ms
         public double ms;
         public int round;
         public List<Pair> info = new List<Pair>();
@@ -72,5 +74,10 @@ namespace UnityBench.Editor
         public bool origPlayEnabled, changedPlayOptions;
         public bool sceneDone, sceneExiting;               // editor.scene_play: the in-Play-Mode run finished / Play Mode is being left
         public int sceneCode;
+        public List<Number> memPeak = new List<Number>();   // largest value seen per memory reading name over the run
+        public List<string> memMissing = new List<string>();
+        public long lastPoll;
+        public int leakIndex;                              // reloads (or Play Mode cycles) read so far
+        public bool snapshotDone;
     }
 }
