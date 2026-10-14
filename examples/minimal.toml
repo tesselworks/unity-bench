@@ -98,3 +98,42 @@ build = "build-time"             # omit to build once per variant, backend and s
 headless = true                  # -batchmode -nographics; false opens a window
 repeats = 4
 rounds = 3
+
+# Scene workloads: play a scene of the project and record frames, profiler markers, GC and memory. No code in the project is needed.
+# Bodies.unity makes no Unity Bench call (the report says "work not verified"); BodiesHooked.unity is the same scene with Bench.Mark / Bench.Begin / Bench.End
+# calls (the Work column then reads "same" or "differs"). A fixed frame count with a fixed delta makes every variant simulate the same frames.
+[[workloads]]
+id = "scene-play"
+kind = "editor.scene_play"       # Play Mode in the batchmode Editor (no GPU, so no rendering markers)
+scene = "Assets/Scenes/Bodies.unity"
+warmup_frames = 60
+duration_frames = 300
+time = { capture_delta = 0.016667, fixed_timestep = 0.02 }
+repeats = 3
+
+[[workloads]]
+id = "scene-play-hooked"
+kind = "editor.scene_play"
+scene = "Assets/Scenes/BodiesHooked.unity"
+warmup_frames = 60
+duration_frames = 300
+time = { capture_delta = 0.016667, fixed_timestep = 0.02 }
+repeats = 3
+
+[[workloads]]
+id = "scene"
+kind = "player.scene"            # a built player, a fresh process per repeat; the player is built once per variant and scene
+scene = "Assets/Scenes/Bodies.unity"
+warmup_seconds = 2               # or warmup_frames
+duration_seconds = 10            # or duration_frames
+headless = false                 # a window, so the rendering markers exist; true = -batchmode -nographics
+repeats = 3
+
+[[workloads]]
+id = "scene-hooked"
+kind = "player.scene"
+scene = "Assets/Scenes/BodiesHooked.unity"
+warmup_frames = 60
+duration_frames = 600            # a fixed number of frames, so work counters that depend on frames are comparable
+time = { capture_delta = 0.016667, fixed_timestep = 0.02 }
+repeats = 3

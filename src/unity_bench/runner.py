@@ -21,7 +21,8 @@ from .summary import read_rows
 
 BATCH_METHOD = 'UnityBench.Editor.BatchEntry.Run'
 EDITOR_ARGS = ['-batchmode', '-nographics']
-PLAYER_KINDS = ('player.startup', 'player.adapter')
+PLAYER_KINDS = ('player.startup', 'player.adapter', 'player.scene')
+SCENE_METHOD = 'UnityBench.Player.SceneWorkload.Run'   # the built-in player entry point of the scene workloads (a player.adapter in the package)
 LOGGED_KINDS = ('editor.script_edit', 'editor.play', 'editor.adapter')   # kinds whose Editor.log has reload blocks to parse
 
 
@@ -91,7 +92,8 @@ class Campaign:
         if status == 'ok':
             for s in outcome['samples']:
                 self.write({'type': 'sample', **base, 'name': s['name'], 'phase': s['phase'], 'ms': s['ms'], 'round': s.get('round', 0),
-                            'info': s.get('info') or {}, 'counters': s.get('counters') or None, 'hash': s.get('hash'), 'work_group': s.get('work_group')})
+                            'info': s.get('info') or {}, 'counters': s.get('counters') or None, 'hash': s.get('hash'), 'work_group': s.get('work_group'),
+                            **({'unit': s['unit']} if s.get('unit') else {})})
             for group in outcome['reloads']:
                 self.write({'type': 'reload', **base, **group})
         return status
@@ -172,7 +174,8 @@ class Campaign:
     def request(self, w, v, row, stem, output=None):
         req = {'schema': 1, 'kind': w['kind'], 'workload': w['id'], 'variant': v['id'], 'outPath': str(self.out / 'results' / f'{stem}.json'),
                'codeOptimization': v['code_optimization'], 'rounds': w['rounds'], 'domainReload': w.get('domain_reload', 'default'),
-               'scene': w.get('scene') or '', 'method': w.get('method', ''), 'args': text_args(w.get('args', {})),
+               'scene': w.get('scene') or '', 'method': w.get('method', ''),
+               'args': text_args(scene_args(w) if w['kind'] in config.SCENE_KINDS else w.get('args', {})),
                'targets': [{'id': t['id'], 'change': t['change'], 'path': self.target_file(t, v)} for t in w.get('targets', [])],
                'buildMode': w.get('mode', 'clean'), 'development': bool(w.get('development')), 'buildTarget': w.get('build_target') or '',
                'backend': (w.get('backend') or v['backend']) if w['kind'].startswith('player.') else '', 'scenes': w.get('scenes', []),
@@ -334,16 +337,17 @@ class Campaign:
         if exe is None:
             return
         log = self.out / 'logs' / f'{stem}-player.log'
-        if w['kind'] == 'player.adapter':
+        if w['kind'] in ('player.adapter', 'player.scene'):
             self.player_adapter(w, v, exe, row, stem, log, sampler, outcome)
         else:
             self.player_startup(w, exe, row, stem, log, sampler, outcome)
 
     def player_adapter(self, w, v, exe, row, stem, log, sampler, outcome):
         result, request = self.out / 'results' / f'{stem}.json', self.out / 'requests' / f'{stem}.json'
+        scene = w['kind'] == 'player.scene'   # a player.adapter whose entry point is the package's own
         request.write_text(json.dumps({'schema': 1, 'workload': w['id'], 'variant': v['id'], 'rounds': w['rounds'],
-                                       'args': text_args(w['args'])}, indent=1), encoding='utf-8')
-        argv = [*self.player_argv(w, exe, log), '-unityBenchAdapter', w['method'], '-unityBenchOut', str(result), '-unityBenchArgs', str(request), *w['player_args']]
+                                       'args': text_args(scene_args(w) if scene else w['args'])}, indent=1), encoding='utf-8')
+        argv = [*self.player_argv(w, exe, log), '-unityBenchAdapter', SCENE_METHOD if scene else w['method'], '-unityBenchOut', str(result), '-unityBenchArgs', str(request), *w['player_args']]
         run = process.run(argv, Path(exe).parent, w['timeout_seconds'], sampler.sample)
         self.finish_run(run, outcome)
         try:
@@ -394,6 +398,12 @@ def build_request(variant):
     build = variant['build']
     return {'apiCompatibility': build.get('api_compatibility') or '', 'il2cppCodeGeneration': build.get('il2cpp_code_generation') or '',
             'stripping': build.get('stripping') or ''}
+
+
+def scene_args(w):
+    """The scene workloads' keys as the flat args the Unity side reads (the same names, strings; `time.*` flattened)."""
+    keys = ('duration_seconds', 'duration_frames', 'warmup_seconds', 'warmup_frames', 'vsync', 'list_markers')
+    return {'scene': w['scenes'][0] if w['kind'] == 'player.scene' else w['scene'], **{k: w[k] for k in keys if k in w}, **w.get('time', {})}
 
 
 def text_args(args):

@@ -15,6 +15,9 @@ Behaviour is chosen by its own options, given before the Unity arguments:
   --player-bad-signal  the built player writes NaN into its first-frame signal
   --player-once    the built player ignores `rounds` and reports one sample per name (like a player adapter that runs once)
   --bad-result K   write a malformed result: null-sample, str-sample, nan-counter, bad-phase
+  --scene-bodies N the scene workloads (player.scene, editor.scene_play) report the work counter bodies=N through a work group (a scene with hooks);
+                   without it they report none ("work not verified")
+  --scene-no-render  the scene workloads cannot record the rendering markers (headless-like)
 """
 import argparse
 import hashlib
@@ -39,6 +42,8 @@ parser.add_argument('--player-error', action='store_true')
 parser.add_argument('--player-once', action='store_true')
 parser.add_argument('--player-bad-signal', action='store_true')
 parser.add_argument('--bad-result', default='')
+parser.add_argument('--scene-bodies', type=int, default=0)
+parser.add_argument('--scene-no-render', action='store_true')
 parser.add_argument('--as-player', action='store_true')
 ours, unity = parser.parse_known_args()
 
@@ -49,6 +54,28 @@ def arg(name):
 
 def digest(text):
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+SCENE_METHOD = 'UnityBench.Player.SceneWorkload.Run'
+
+
+def scene_result(args, env):
+    """What the package's scene workload reports: frame and marker distributions with units, totals, notes, and a work group when the scene made hook calls."""
+    group = 'scene' if ours.scene_bodies else None
+    steady = [float(i) * ours.scale for i in range(1, 101)]
+    markers = ['Main Thread', 'PlayerLoop', 'GC Allocated In Frame'] + ([] if ours.scene_no_render else ['Camera.Render'])
+    values = {'Main Thread': steady, 'PlayerLoop': [v / 2 for v in steady], 'Camera.Render': [v / 4 for v in steady],
+              'GC Allocated In Frame': [0.0] * 90 + [1024.0 * ours.scale] * 10}
+    dists = [{'name': 'frame', 'phase': 'warmup', 'values': [30.0 * ours.scale] * 3, 'unit': 'ms', 'workGroup': group},
+             {'name': 'frame', 'phase': 'steady', 'values': steady, 'unit': 'ms', 'workGroup': group}]
+    dists += [{'name': m, 'phase': 'steady', 'values': values[m], 'unit': 'bytes' if m.startswith('GC') else 'ms', 'workGroup': group} for m in markers]
+    result = {'schema': 1, 'completed': True, 'error': None, 'environment': env, 'distributions': dists,
+              'samples': [{'name': 'GC Allocated In Frame steady total', 'ms': 10240.0 * ours.scale, 'unit': 'bytes', 'workGroup': group},
+                          {'name': 'GC collections gen0 steady', 'ms': 2.0, 'unit': 'count', 'workGroup': group}],
+              'notes': {'markers.recorded': ', '.join(markers), 'markers.missing': '' if not ours.scene_no_render else 'Camera.Render', 'scene': args.get('scene', '')}}
+    if group:
+        result['workGroups'] = {group: {'hash': None, 'counters': {'bodies': ours.scene_bodies}}}
+    return result
 
 
 def run_player():
@@ -68,6 +95,9 @@ def run_player():
     if ours.player_error:
         Path(arg('-unityBenchOut')).write_text(json.dumps({'schema': 1, 'completed': False, 'error': 'adapter blew up\nsecond line', 'samples': []}))
         sys.exit(1)
+    if arg('-unityBenchAdapter') == SCENE_METHOD:
+        Path(arg('-unityBenchOut')).write_text(json.dumps(scene_result({pair['k']: pair['v'] for pair in request['args']}, env)))
+        return
     salt = ours.salt if ours.salt_item == 'frame' else ''
     steady = [float(i) * ours.scale for i in range(1, 101)]
     result = {'schema': 1, 'completed': True, 'error': None, 'environment': env, 'notes': {'method': arg('-unityBenchAdapter')},
@@ -84,6 +114,7 @@ def run_player():
 def write_player(output_dir):
     """A launcher that behaves like the built player: the same script, in player mode, with this process's own options."""
     options = [sys.executable, str(Path(__file__).resolve()), '--as-player', '--scale', str(ours.scale), '--salt', ours.salt, '--salt-item', ours.salt_item]
+    options += ['--scene-bodies', str(ours.scene_bodies)] + ['--scene-no-render'] * ours.scene_no_render
     options += ['--fail'] * ours.player_fail + ['--hang'] * ours.player_hang + ['--player-error'] * ours.player_error + ['--player-once'] * ours.player_once + ['--player-bad-signal'] * ours.player_bad_signal
     output_dir.mkdir(parents=True, exist_ok=True)
     if os.name == 'nt':
@@ -138,6 +169,10 @@ if request_path:
                     samples.append({'name': f"{t['id']}/{suffix}", 'phase': 'first-use' if r == 0 else 'warm', 'round': r, 'ms': ms * ours.scale,
                                     'hash': None, 'counters': {}, 'info': {'assemblies': 1, 'reloaded': True}})
     notes = {}
+    if req['kind'] == 'editor.scene_play':
+        Path(req['outPath']).write_text(json.dumps(scene_result({pair['k']: pair['v'] for pair in req['args']}, env)))
+        log.write_text('\n'.join(lines) + '\n')
+        sys.exit(0)
     if req['kind'] == 'player.build_time':
         notes['playerExecutable'] = str(write_player(Path(req['outputDir'])))
         for r in range(req['rounds']):

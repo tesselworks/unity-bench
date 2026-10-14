@@ -15,7 +15,8 @@ class ResultError(ValueError):
 def check_sample(s):
     return (isinstance(s, dict) and isinstance(s.get('name'), str) and s['name'] and s.get('phase') in (None, '', *PHASES)
             and finite(s.get('ms')) and s['ms'] >= 0 and (s.get('hash') is None or isinstance(s['hash'], str)) and counters_ok(s.get('counters'))
-            and isinstance(s.get('info') or {}, dict) and (s.get('workGroup') is None or isinstance(s['workGroup'], str)))
+            and isinstance(s.get('info') or {}, dict) and (s.get('workGroup') is None or isinstance(s['workGroup'], str))
+            and s.get('unit') in (None, *distributions.UNITS))
 
 
 def work_groups(data):
@@ -69,7 +70,7 @@ def read_result(path):
         if data.get(key) is not None and not isinstance(data[key], dict):
             raise ResultError(f'{key} must be an object')
     out = [{'name': s['name'], 'phase': s.get('phase') or None, 'round': s['round'] if isinstance(s.get('round'), int) else 0, 'ms': s['ms'],
-            'hash': s.get('hash'), 'counters': s.get('counters') or {}, 'info': s.get('info') or {}, 'work_group': s.get('workGroup')} for s in samples]
+            'hash': s.get('hash'), 'counters': s.get('counters') or {}, 'info': s.get('info') or {}, 'work_group': s.get('workGroup'), 'unit': s.get('unit')} for s in samples]
     derive_phases(out)
     out += distributions.to_samples(dists)
     for s in out:   # a sample that reports no identity of its own inherits its work group's

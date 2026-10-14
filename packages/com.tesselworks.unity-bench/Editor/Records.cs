@@ -70,5 +70,7 @@ namespace UnityBench.Editor
         public List<Pair> originals = new List<Pair>();   // project-relative path -> original file text, restored on exit
         public string origPlayOptions = "";
         public bool origPlayEnabled, changedPlayOptions;
+        public bool sceneDone, sceneExiting;               // editor.scene_play: the in-Play-Mode run finished / Play Mode is being left
+        public int sceneCode;
     }
 }

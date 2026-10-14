@@ -105,6 +105,21 @@ Each measurement is a **sample** with a name, a `phase` and milliseconds. The ph
 
 An adapter may tag a sample with any of the first four. An untagged sample is classified by the runner from how often its name occurs in the process (first-use for the first of several, warm for the rest, single for one), so a single execution is never called warm unless the adapter says so. First-use samples are labelled, kept in `results.jsonl`, listed in the report (as raw samples, or as a table of ratios with `report --first-use-ratios`), and **excluded from the steady-state summary by default**. `report --include-first-use` (or `defaults.exclude_first_use = false`) includes them. When the story is startup or JIT (the first Play Mode entry after an edit, the first spawn of a new object kind), the first-use table is the result, not a footnote.
 
+## Profiler markers per backend
+
+The scene workloads ([workloads.md](workloads.md#playerscene-and-editorscene_play)) record `ProfilerRecorder`s, and which ones exist is a property of the process that runs the scene, not of the workload. The report lists, per variant, what was recorded and what was not; this is what it showed on macOS (Apple silicon), Unity 6000.7.0b2 and 7000.0.0a7, in the example project (built-in render pipeline, Metal):
+
+| Process | Recorders offered | The workload recorded | Not offered |
+| --- | --- | --- | --- |
+| Editor, batchmode `-nographics`, 6.7 Mono and 7 CoreCLR (`editor.scene_play`) | about 3,500 | all 22 wanted | none. The rendering markers exist but never run without a GPU, so they read 0 |
+| Development player, 6.7 Mono and 7 CoreCLR (`development = true`) | about 2,500 | all, but the script and fixed-update markers have their player names `BehaviourUpdate` and `FixedBehaviourUpdate` | `Update.ScriptRunBehaviourUpdate`, `FixedUpdate.PhysicsFixedUpdate` (the same work, another name) |
+| Release player, 6.7 Mono, 6.7 IL2CPP, 7 CoreCLR, 7 IL2CPP | 62 (63 on 7: also `Draw Calls Count`); the same list on every backend of one Editor | `Main Thread`, `PlayerLoop`, `RenderLoop`, `Gfx.WaitForPresentOnGfxThread`, `Gfx.WaitForRenderThread`, `SetPass Calls Count`, `Triangles Count`, `Vertices Count`, `GC.Collect`, `GC Used Memory`, `GC Reserved Memory`, `Total Used Memory`, `App Resident Memory` | scripts (`Update.ScriptRunBehaviourUpdate`/`BehaviourUpdate`, `FixedUpdate...`), `Physics.Simulate`, `Physics2D.Simulate`, `Culling`, `Camera.Render`, `GC.Alloc`, `GC Allocated In Frame`, `GC Allocation In Frame Count` |
+
+- In a Release player there is no physics, script or allocation marker; `development = true` brings them back, but a Development player is slower and is not what ships, so compare like with like. There is no difference between Mono and IL2CPP in what is offered; Unity 6.7 and 7 differ only by `Draw Calls Count`.
+- Backends differ in the managed side the workload also reads: `GC.CollectionCount` counts every generation alike on Mono and on 6.7 IL2CPP (the Boehm collector), 7 IL2CPP is similar, and CoreCLR counts real generations and, with this much garbage, none at all. The process's peak working set was available from `Process` only on Mono (the others report no value, and the item is missing for them); `App Resident Memory` is the level every process offers.
+- In the Editor, profiler frames never close in batchmode, so `LastValue` stays 0 and the recorders accumulate. The workload detects that (a recorder with fewer than two completed samples) and takes the change since the previous frame. In a player it uses the recorder's own per-frame sample.
+- A free-running player (no `capture_delta`) was paced by the engine here: the frame time p50 was 0.200 ms on 6.7 and 0.100 ms on 7 (5 and 10 kHz), the same value in every process, so the frame time says how the engine waits, not what the scene costs. With `time.capture_delta` the frames are not paced (p50 about 0.3 ms). Rendering counters were not the same across Editors for the same scene in a Development player (`Triangles Count` about 26,600 on 6.7, 4 on 7); they are reported as read and not explained.
+
 ## Summary
 
 For each item (a sample name inside a workload) and variant:

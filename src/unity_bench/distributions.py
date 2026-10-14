@@ -7,6 +7,7 @@ processes, min-max range, ratio. The raw frame times stay in the process's resul
 """
 import math
 
+UNITS = ('ms', 'bytes', 'count')   # what a value is (default ms). The field keeps its name `ms` for schema 1; the unit says what it holds
 STATS = (('p50', .50), ('p95', .95), ('p99', .99), ('max', 1.0))
 
 
@@ -29,7 +30,7 @@ def check(d):
     return (isinstance(d, dict) and isinstance(d.get('name'), str) and d['name'] and isinstance(d.get('phase'), str) and d['phase']
             and isinstance(d.get('values'), list) and d['values'] and all(finite(x) and x >= 0 for x in d['values'])
             and (d.get('hash') is None or isinstance(d['hash'], str)) and counters_ok(d.get('counters'))
-            and (d.get('workGroup') is None or isinstance(d['workGroup'], str)))
+            and (d.get('workGroup') is None or isinstance(d['workGroup'], str)) and d.get('unit') in (None, *UNITS))
 
 
 def to_samples(entries):
@@ -44,6 +45,6 @@ def to_samples(entries):
         phase = d['phase'] if d['phase'] in ('first-use', 'warmup', 'steady') else 'warm'
         for stat, fraction in STATS:
             out.append({'name': f"{d['name']} {d['phase']} {stat}", 'phase': phase, 'round': 0, 'ms': percentile(values, fraction),
-                        'hash': d.get('hash'), 'counters': d.get('counters') or {}, 'work_group': d.get('workGroup'),
+                        'hash': d.get('hash'), 'counters': d.get('counters') or {}, 'work_group': d.get('workGroup'), 'unit': d.get('unit'),
                         'info': {**(d.get('info') or {}), 'frames': len(values)}})
     return out

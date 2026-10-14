@@ -40,6 +40,9 @@ class FakeProcess:
         self.calls += 1
         return collections.namedtuple('Times', 'user system')(value, 0.0)
 
+    def memory_info(self):
+        return types.SimpleNamespace(rss=100 * 2 ** 20)
+
     def children(self, recursive=True):
         kids = self.kids() if callable(self.kids) else self.kids
         return list(kids)
@@ -104,6 +107,8 @@ class SamplerWithFakePsutilTests(unittest.TestCase):
         self.assertEqual(out['series']['machine_cpu'], [50.0, 50.0])
         self.assertEqual(out['series']['tree_cpu'], [10.0, 10.0])
         self.assertEqual(out['other_cpu_median'], 40.0)
+        self.assertEqual(out['series']['tree_rss_mb'], [100.0, 100.0])
+        self.assertEqual(out['tree_rss_max_mb'], 100.0)
 
 
 if __name__ == '__main__':

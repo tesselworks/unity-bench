@@ -48,8 +48,11 @@ To measure your own project: point `[project] path` at it, list your Editors und
 | `player.build_time` | `BuildPipeline.BuildPlayer`, clean or incremental, per scripting backend |
 | `player.startup` | launch a built player until its probe frame (`launch_to_probe`: after the first scene loaded and two frames ran; not a presented frame) |
 | `player.adapter` | your C# entry point inside a built player, over many frames: samples, p50/p95/p99/max distributions with warm-up kept apart, work counters, output hash |
+| `player.scene`, `editor.scene_play` | **no code needed**: play a scene in a built player or in Play Mode and record frame time, `ProfilerRecorder` markers (main thread, PlayerLoop, physics, rendering, scripts, GC) and memory. Optional hook calls in the game make the work verified |
 
 Details and keys: [docs/workloads.md](docs/workloads.md).
+
+**Zero-code start, hooks when you need verified work.** To see how your main scene runs on Editor or backend B against A, point a `player.scene` (or `editor.scene_play`) workload at it: no code in the project, and you get frame percentiles and the profiler markers each backend offers. Such a table says "work not verified", because nothing tells it the variants did the same work. When that matters, add `Bench.Mark("bodies", n)` (and `Bench.Hash`, `Bench.Begin/End` for your own segments) to the game: the same workload then compares your counters and reads "same" or "differs", with no rewrite as an adapter ([Scene hooks](docs/adapters.md#scene-hooks)).
 
 ## Sample report
 

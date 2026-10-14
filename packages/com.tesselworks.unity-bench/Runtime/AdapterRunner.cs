@@ -23,10 +23,14 @@ namespace UnityBench.Player
         string method, outPath, requestArg;
         PlayerContext context;
 
+        // Set by the Editor when it runs an adapter in Play Mode (editor.scene_play): it gets the exit code instead of the player quitting.
+        internal static Action<int> Finished;
+
         internal static void Attach(string method, string outPath, string requestArg)
         {
-            // A player in the background must keep running, or an unfocused window would pause the measurement.
-            Application.runInBackground = true;
+            // A player in the background must keep running, or an unfocused window would pause the measurement. (In the Editor this setter
+            // would change the project's Player Settings.)
+            if (!Application.isEditor) Application.runInBackground = true;
             var go = new GameObject("UnityBenchAdapterRunner");
             DontDestroyOnLoad(go);
             var runner = go.AddComponent<AdapterRunner>();
@@ -116,7 +120,7 @@ namespace UnityBench.Player
                 File.Move(temp, outPath);
             }
             catch (Exception e) { Debug.LogException(e); code = 3; }
-            Application.Quit(code);
+            if (Application.isEditor) Finished?.Invoke(code); else Application.Quit(code);
         }
 
         string Build(Exception failure)
@@ -132,7 +136,8 @@ namespace UnityBench.Player
                 var s = samples[i];
                 b.Append(i > 0 ? "," : "").Append("{\"name\":").Append(ResultJson.Quote(s.Name)).Append(",\"phase\":").Append(ResultJson.OrNull(s.Phase));
                 b.Append(",\"round\":").Append(s.Round).Append(",\"ms\":").Append(ResultJson.Num(s.Ms));
-                b.Append(",\"hash\":").Append(ResultJson.OrNull(s.Hash)).Append(",\"workGroup\":").Append(ResultJson.OrNull(s.WorkGroup)).Append(",\"counters\":").Append(Counters(s.Counters)).Append('}');
+                b.Append(",\"hash\":").Append(ResultJson.OrNull(s.Hash)).Append(",\"workGroup\":").Append(ResultJson.OrNull(s.WorkGroup)).Append(",\"unit\":").Append(ResultJson.OrNull(s.Unit))
+                    .Append(",\"counters\":").Append(Counters(s.Counters)).Append('}');
             }
             b.Append("],\"distributions\":[");
             var distributions = context?.Distributions ?? new List<PlayerContext.Distribution>();
@@ -140,7 +145,8 @@ namespace UnityBench.Player
             {
                 var d = distributions[i];
                 b.Append(i > 0 ? "," : "").Append("{\"name\":").Append(ResultJson.Quote(d.Name)).Append(",\"phase\":").Append(ResultJson.Quote(d.Phase));
-                b.Append(",\"hash\":").Append(ResultJson.OrNull(d.Hash)).Append(",\"workGroup\":").Append(ResultJson.OrNull(d.WorkGroup)).Append(",\"counters\":").Append(Counters(d.Counters)).Append(",\"values\":[");
+                b.Append(",\"hash\":").Append(ResultJson.OrNull(d.Hash)).Append(",\"workGroup\":").Append(ResultJson.OrNull(d.WorkGroup)).Append(",\"unit\":").Append(ResultJson.OrNull(d.Unit))
+                    .Append(",\"counters\":").Append(Counters(d.Counters)).Append(",\"values\":[");
                 for (var v = 0; v < d.Values.Length; v++) b.Append(v > 0 ? "," : "").Append(ResultJson.Num(d.Values[v]));
                 b.Append("]}");
             }

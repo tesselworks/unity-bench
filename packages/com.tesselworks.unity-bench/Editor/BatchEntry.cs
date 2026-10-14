@@ -167,6 +167,10 @@ namespace UnityBench.Editor
                 case "editor.adapter":
                     s.plan.Add(new Step { name = "adapter", round = 0 });
                     break;
+                case "editor.scene_play":
+                    PrepareScene(req.scene);
+                    s.plan.Add(new Step { name = "scene", round = 0 });
+                    break;
                 case "player.build_time":
                     PreparePlayerSettings();
                     // Configured scenes are used as they are (a prebuild hook may still create them); otherwise a default scene is generated.
@@ -209,6 +213,7 @@ namespace UnityBench.Editor
                 case "editor.script_edit": EditStep(step); break;
                 case "editor.play": PlayStep(step); break;
                 case "editor.adapter": AdapterStep(step); break;
+                case "editor.scene_play": SceneStep(step); break;
                 case "player.build_time": BuildStep(step); break;
             }
         }
@@ -305,6 +310,36 @@ namespace UnityBench.Editor
             }
         }
 
+        // editor.scene_play: enter Play Mode with the scene open; the package's scene workload (UnityBench.Player.SceneWorkload) starts when Play Mode
+        // is entered (OnPlayMode), writes the result file itself and reports the exit code here. Then Play Mode is left and the Editor exits.
+        static void SceneStep(Step step)
+        {
+            if (!s.started)
+            {
+                if (!Idle || EditorApplication.isPlaying) return;
+                Begin(step);
+                EditorApplication.EnterPlaymode();
+                return;
+            }
+            if (!s.sceneDone) return;
+            if (EditorApplication.isPlaying)
+            {
+                if (!s.sceneExiting) { s.sceneExiting = true; Save(); EditorApplication.ExitPlaymode(); }
+                return;
+            }
+            if (s.sceneCode != 0) { s.error = "the scene workload failed (see its result file)"; return; }
+            End(step);
+        }
+
+        static void StartSceneWorkload()
+        {
+            UnityBench.Player.SceneWorkload.RunInEditor(s.req.outPath, Arg("-unityBenchRequest"), code =>
+            {
+                if (s == null) return;
+                s.sceneDone = true; s.sceneCode = code; Save();
+            });
+        }
+
         // editor.adapter: call the project's entry point once. It measures its own work through AdapterContext.
         static void AdapterStep(Step step)
         {
@@ -353,10 +388,11 @@ namespace UnityBench.Editor
 
         static void OnPlayMode(PlayModeStateChange change)
         {
-            if (s == null || !s.started || s.req.kind != "editor.play" || s.cursor >= s.plan.Count) return;
+            if (s == null || !s.started || (s.req.kind != "editor.play" && s.req.kind != "editor.scene_play") || s.cursor >= s.plan.Count) return;
             var step = s.plan[s.cursor];
             if (change == PlayModeStateChange.EnteredPlayMode && step.name == "enter") { s.enteredPlay = Now; s.enteredFrame = Time.frameCount; Save(); }
             if (change == PlayModeStateChange.EnteredEditMode && step.name == "exit") { s.enteredEdit = Now; Save(); }
+            if (change == PlayModeStateChange.EnteredPlayMode && step.name == "scene" && !s.sceneDone) StartSceneWorkload();
         }
 
         // ---- result ------------------------------------------------------------------------------------------------
@@ -379,7 +415,8 @@ namespace UnityBench.Editor
                 }
             }
             catch { }
-            File.WriteAllText(s.req.outPath, ResultWriter.Build(s, code == 0));
+            // The scene workload writes its own result (also when it failed, with the reason); the Editor's records have nothing to add to it.
+            if (!(s.req.kind == "editor.scene_play" && s.sceneDone)) File.WriteAllText(s.req.outPath, ResultWriter.Build(s, code == 0));
             SessionState.EraseString(Key);
             EditorApplication.Exit(code);
         }

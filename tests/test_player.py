@@ -61,7 +61,30 @@ class DistributionTests(unittest.TestCase):
                 runner.read_result(p)
 
 
-class PlayerRunnerTests(unittest.TestCase):
+class UnitTests(unittest.TestCase):
+    def test_units_are_checked_carried_and_formatted(self):
+        from unity_bench import report
+        good = {'name': 'GC Used Memory', 'phase': 'steady', 'values': [1024.0, 2048.0], 'unit': 'bytes'}
+        self.assertTrue(distributions.check(good))
+        self.assertFalse(distributions.check({**good, 'unit': 'furlongs'}))
+        self.assertEqual({s['unit'] for s in distributions.to_samples([good])}, {'bytes'})
+        self.assertEqual(report.amount(1536, 'bytes'), '1.5 KB')
+        self.assertEqual(report.amount(5 * 2 ** 20, 'bytes'), '5.0 MB')
+        self.assertEqual(report.amount(123456, 'count'), '123,456')
+        self.assertEqual(report.amount(2.5, 'ms'), '2.50')
+        self.assertEqual(report.ratio_cell({'ratio': None}, 'bytes'), 'baseline 0')   # a zero baseline has no ratio; for ms it is below the timer resolution
+        self.assertEqual(report.ratio_cell({'ratio': None}, 'ms'), '<res')
+
+    def test_a_zero_baseline_has_no_ratio(self):
+        from unity_bench import stats
+        zero, some = stats.describe([0.0, 0.0]), stats.describe([3.0, 4.0])
+        self.assertIsNone(stats.compare(zero, some, 0.0)['ratio'])
+        self.assertEqual(stats.compare(some, zero, 0.0)['ratio'], 0.0)
+
+
+class CampaignCase(unittest.TestCase):
+    """A temporary project and campaign file, run with the fake Editor."""
+
     def setUp(self):
         if os.name == 'nt' and fake_launcher.launcher() is None:
             self.skipTest('no .NET Framework compiler to build a fake player .exe (the runner refuses batch files)')
@@ -84,6 +107,8 @@ class PlayerRunnerTests(unittest.TestCase):
         out = runner.run_campaign(path, self.tmp / name, log=lambda *_: None, **kwargs)
         return out, summary.read_rows(out / 'results.jsonl')
 
+
+class PlayerRunnerTests(CampaignCase):
     def test_adapter_reports_samples_and_distributions_per_process(self):
         path = self.campaign([{'id': 'a', 'editor': editor()}, {'id': 'b', 'editor': editor('--scale', '2'), 'baseline': 'a'}],
                              [{'id': 'pa', 'kind': 'player.adapter', 'method': 'My.Adapters.Run', 'args': {'echo': 'hi'}, 'rounds': 3, 'repeats': 3}])
@@ -272,6 +297,107 @@ class PlayerRunnerTests(unittest.TestCase):
         subprocess.run(['git', '-C', str(repo), 'worktree', 'prune'], capture_output=True)
 
 
+class SceneWorkloadTests(CampaignCase):
+    """player.scene and editor.scene_play with the fake Editor and player: what the runner asks for, what it stores, what the report says about work."""
+
+    def scene_campaign(self, variants, kind='player.scene', **keys):
+        return self.campaign(variants, [{'id': 'scene', 'kind': kind, 'scene': 'Assets/Scenes/Bodies.unity', 'repeats': 2, 'duration_frames': 100, **keys}])
+
+    def summary_of(self, out):
+        return json.loads((out / 'summary.json').read_text())['workloads'][0]
+
+    def test_player_scene_runs_the_package_entry_point_with_the_scene_options_and_builds_only_that_scene(self):
+        path = self.scene_campaign([{'id': 'a', 'editor': editor()}, {'id': 'b', 'editor': editor('--scale', '2'), 'baseline': 'a'}],
+                                   warmup_frames=30, time={'capture_delta': 0.02, 'fixed_timestep': 0.01})
+        out, rows = self.run_campaign(path)
+        self.assertEqual(failures(rows), [])
+        request = json.loads(next((out / 'requests').glob('*scene-a.json')).read_text())
+        self.assertEqual({p['k']: p['v'] for p in request['args']}, {'scene': 'Assets/Scenes/Bodies.unity', 'duration_frames': '100', 'warmup_frames': '30', 'vsync': 'false',
+                                                                       'list_markers': 'false', 'capture_delta': '0.02', 'fixed_timestep': '0.01'})
+        build = json.loads(next((out / 'requests').glob('*-build.json')).read_text())
+        self.assertEqual(build['scenes'], ['Assets/Scenes/Bodies.unity'])
+        self.assertEqual(setting(rows, 'setup-build')[0]['notes']['scenes'], 'Assets/Scenes/Bodies.unity')
+        player = next(r for r in rows if r['type'] == 'process' and r['kind'] == 'player.scene' and r.get('role') is None)
+        self.assertEqual(player['notes']['scene'], 'Assets/Scenes/Bodies.unity')
+        self.assertEqual(player['environment']['platform'], 'FakePlayer')
+
+    def test_values_keep_their_units_and_the_ratio_follows_them(self):
+        path = self.scene_campaign([{'id': 'a', 'editor': editor()}, {'id': 'b', 'editor': editor('--scale', '2'), 'baseline': 'a'}])
+        out, rows = self.run_campaign(path)
+        items = {i['name']: i for i in self.summary_of(out)['items']}
+        self.assertEqual(items['frame steady p50']['unit'], 'ms')
+        self.assertEqual(items['GC Allocated In Frame steady max']['unit'], 'bytes')
+        self.assertEqual(items['GC collections gen0 steady']['unit'], 'count')
+        self.assertEqual(items['GC Allocated In Frame steady p50']['variants']['a']['median'], 0)
+        self.assertIsNone(items['GC Allocated In Frame steady p50']['ratios']['b']['ratio'])     # zero baseline: no ratio, no ZeroDivisionError
+        self.assertAlmostEqual(items['GC Allocated In Frame steady max']['ratios']['b']['ratio'], 2.0)
+        self.assertAlmostEqual(items['Main Thread steady p95']['ratios']['b']['ratio'], 2.0)
+        md = (out / 'summary.md').read_text()
+        self.assertIn('| GC Allocated In Frame steady max | 1.0 KB [1.0 KB-1.0 KB] n=2 | 2.0 KB', md)
+        self.assertEqual([r['unit'] for r in rows if r['type'] == 'sample' and r['name'] == 'GC collections gen0 steady'][:1], ['count'])
+
+    def test_without_hook_calls_the_work_column_says_not_verified(self):
+        path = self.scene_campaign([{'id': 'a', 'editor': editor()}, {'id': 'b', 'editor': editor(), 'baseline': 'a'}])
+        out, rows = self.run_campaign(path)
+        w = self.summary_of(out)
+        self.assertFalse(w['work_verified'])
+        md = (out / 'summary.md').read_text()
+        self.assertIn('Work not verified: the scene made no `Bench.Mark` or `Bench.Hash` call', md)
+        row = next(line for line in md.splitlines() if line.startswith('| frame steady p50 |'))
+        self.assertTrue(row.endswith('| not verified |'), row)
+        self.assertNotIn('not reported', md)
+
+    def test_with_hook_calls_equal_counters_read_same_and_different_counters_are_flagged(self):
+        same = self.scene_campaign([{'id': 'a', 'editor': editor('--scene-bodies', '150')}, {'id': 'b', 'editor': editor('--scene-bodies', '150', '--scale', '2'), 'baseline': 'a'}])
+        out, rows = self.run_campaign(same)
+        w = self.summary_of(out)
+        self.assertTrue(w['work_verified'])
+        self.assertEqual({i['identity']['status'] for i in w['items']}, {'identical'})
+        md = (out / 'summary.md').read_text()
+        self.assertIn('Work verified', md)
+        self.assertTrue(next(line for line in md.splitlines() if line.startswith('| frame steady p50 |')).endswith('| same |'))
+        sample = next(r for r in rows if r['type'] == 'sample' and r['name'] == 'frame steady p50')
+        self.assertEqual((sample['counters'], sample['work_group']), ({'bodies': 150}, 'scene'))
+        different = self.scene_campaign([{'id': 'a', 'editor': editor('--scene-bodies', '150')}, {'id': 'b', 'editor': editor('--scene-bodies', '149'), 'baseline': 'a'}])
+        out, _ = self.run_campaign(different, name='out2')
+        w = self.summary_of(out)
+        self.assertEqual(w['items'], [])                                   # every item shares the scene's work identity, so all of them are set apart
+        self.assertTrue(all(i['identity']['status'] == 'differs' for i in w['differing']))
+        one_side = self.scene_campaign([{'id': 'a', 'editor': editor('--scene-bodies', '150')}, {'id': 'b', 'editor': editor(), 'baseline': 'a'}])
+        out, _ = self.run_campaign(one_side, name='out3')
+        self.assertEqual({i['identity']['status'] for i in self.summary_of(out)['items']}, {'partial'})   # reported on one side only is not "same"
+
+    def test_markers_a_player_did_not_have_are_listed_per_variant(self):
+        path = self.scene_campaign([{'id': 'a', 'editor': editor()}, {'id': 'b', 'editor': editor('--scene-no-render'), 'baseline': 'a'}])
+        out, _ = self.run_campaign(path)
+        markers = self.summary_of(out)['markers']
+        self.assertEqual(markers['a']['missing'], [])
+        self.assertEqual(markers['b']['missing'], ['Camera.Render'])
+        self.assertIn('Camera.Render', markers['a']['recorded'])
+        md = (out / 'summary.md').read_text()
+        self.assertIn('| b | GC Allocated In Frame, Main Thread, PlayerLoop | Camera.Render |', md)
+
+    def test_editor_scene_play_uses_the_editor_batch_path_and_the_same_report(self):
+        path = self.scene_campaign([{'id': 'a', 'editor': editor('--scene-bodies', '150')}, {'id': 'b', 'editor': editor('--scene-bodies', '150', '--scale', '2'), 'baseline': 'a'}],
+                                   kind='editor.scene_play')
+        out, rows = self.run_campaign(path)
+        self.assertEqual(failures(rows), [])
+        request = json.loads(next((out / 'requests').glob('*scene-a.json')).read_text())
+        self.assertEqual((request['kind'], request['scene']), ('editor.scene_play', 'Assets/Scenes/Bodies.unity'))
+        self.assertEqual({p['k']: p['v'] for p in request['args']}['duration_frames'], '100')
+        w = self.summary_of(out)
+        self.assertEqual(w['kind'], 'editor.scene_play')
+        self.assertTrue(w['work_verified'])
+        self.assertAlmostEqual(next(i for i in w['items'] if i['name'] == 'frame steady p99')['ratios']['b']['ratio'], 2.0)
+        self.assertEqual(setting(rows, 'setup-build'), [])                 # no player is built for an Editor workload
+
+    def test_a_failing_scene_run_is_recorded_and_the_schedule_continues(self):
+        path = self.scene_campaign([{'id': 'ok', 'editor': editor()}, {'id': 'error', 'editor': editor('--player-error')}])
+        out, rows = self.run_campaign(path)
+        status = {r['variant']: r['status'] for r in rows if r['type'] == 'process' and r.get('role') is None}
+        self.assertEqual(status, {'ok': 'ok', 'error': 'failed'})
+
+
 class PlayerConfigTests(unittest.TestCase):
     @staticmethod
     def base(**changes):
@@ -295,6 +421,24 @@ class PlayerConfigTests(unittest.TestCase):
         self.check(self.base(workloads=[{'id': 'w', 'kind': 'player.adapter', 'method': 'A.B.Run', 'prebuild': 'nope'}]), 'prebuild')
         self.check(self.base(workloads=[{'id': 'w', 'kind': 'player.adapter', 'method': 'A.B.Run', 'build': 'zzz'}]), 'build must name')
         self.check(self.base(workloads=[{'id': 'w', 'kind': 'player.adapter', 'method': 'A.B.Run', 'typo': 1}]), 'unknown key')
+
+    def test_scene_workloads_validate_scene_duration_warmup_and_clock(self):
+        player = {'id': 'w', 'kind': 'player.scene', 'scene': 'Assets/S.unity'}
+        w = config.validate(self.base(workloads=[player]), '/base')['workloads'][0]
+        self.assertEqual((w['scenes'], w['duration_seconds'], w['warmup_seconds'], w['time'], w['vsync'], w['headless'], w['timeout_seconds']), (['Assets/S.unity'], 10, 2, {}, False, False, 1800))
+        frames = config.validate(self.base(workloads=[{**player, 'duration_frames': 600, 'warmup_frames': 0, 'time': {'capture_delta': 0.016, 'fixed_timestep': 0.02}}]), '/base')['workloads'][0]
+        self.assertNotIn('duration_seconds', frames)
+        self.assertNotIn('warmup_seconds', frames)
+        editor = config.validate(self.base(workloads=[{'id': 'e', 'kind': 'editor.scene_play', 'scene': 'Assets/S.unity', 'state': 'warm'}]), '/base')['workloads'][0]
+        self.assertEqual((editor['scene'], editor['state']), ('Assets/S.unity', 'warm'))
+        for bad, message in (({'scene': None}, 'scene must be'), ({'scene': '../S.unity'}, 'scene must be'), ({'scene': 'Assets/S.prefab'}, 'scene must be'),
+                             ({'duration_seconds': 5, 'duration_frames': 5}, 'not both'), ({'warmup_seconds': 1, 'warmup_frames': 1}, 'not both'),
+                             ({'duration_frames': 0}, 'positive integer'), ({'duration_seconds': 0}, 'positive number'), ({'warmup_frames': -1}, 'non-negative'),
+                             ({'time': {'capture_delta': 0}}, 'in \\(0, 1\\]'), ({'time': {'speed': 2}}, 'unknown key'), ({'time': 1}, 'must be a table'),
+                             ({'vsync': 'no'}, 'booleans'), ({'scenes': ['Assets/S.unity']}, 'unknown key'), ({'build': 'b'}, 'unknown key')):
+            self.check(self.base(workloads=[{**player, **bad}]), message)
+        self.check(self.base(workloads=[{'id': 'e', 'kind': 'editor.scene_play', 'scene': 'Assets/S.unity', 'headless': True}]), 'unknown key')
+        self.check(self.base(workloads=[{**player, 'state': 'cold'}]), 'state applies')
 
     def test_baselines_prepare_and_worktree_targets(self):
         cfg = config.validate(self.base(defaults={'baseline': 'b'}, variants=[{'id': 'a', 'editor': '/u/a', 'baseline': 'a'}, {'id': 'b', 'editor': '/u/b'}, {'id': 'c', 'editor': '/u/c'}]), '/base')
