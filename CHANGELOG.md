@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.0
+
+Cache control: named start states, snapshots, and prepared project copies that survive between campaigns and runs (tesselworks/unity-bench#6). Philosophy unchanged: annotate, do not refuse; a state that cannot be set up is recorded and the process runs anyway.
+
+### Behaviour that changes **(changes numbers or where files are)**
+
+- **Prepared copies are cached and primed by default.** After `project.prepare`, an untimed Editor open imports (and on a newer Editor migrates) the copy, and the result is snapshotted under the cache directory (`--cache-dir`, `UNITY_BENCH_CACHE_DIR`, else the OS user cache directory). The next run or campaign with the same key restores the snapshot instead of preparing: no copy, no `project.prepare`, no import. The first `warm_open` of a copy therefore no longer pays the import. `--no-cache` is the v0.3 behaviour exactly.
+- **`editor.cold_open` isolates the global caches** it can: the script compilation cache (`BEE_CACHE_DIRECTORY`), the Package Manager cache (`UPM_CACHE_ROOT`) and the Accelerator (`-cacheServerEnableDownload/Upload false`), each pointed at an empty directory made for that process. With the Package Manager cache isolated, a project with registry packages downloads them in every cold open; `[cache] isolate = []` goes back to "Library deleted". The user's real caches are never read or written for the isolated parts.
+- **Where the project copies live.** With the cache on, the default work directory is `<cache dir>/w` instead of `<run dir>/work`, the same path on every run: a primed project opened from another path recompiled all its scripts (31 s instead of 0.5 s in the example project). `--work` still overrides it; use the same directory every time. A leftover copy in the default directory (a killed run) is deleted; a leftover in a directory you named still stops the run.
+
+### New
+
+- **`state = "cold" | "warm" | "as-is"` per workload** (`editor.*`, `player.build_time`). `warm` restores the prepared copy's snapshot (everything, `Library` included) before every process. Defaults keep v0.3 behaviour: `cold` for `editor.cold_open`, `as-is` for the rest.
+- **Snapshots and restore**: APFS `clonefile` on macOS, `cp --reflink=auto` on Linux, a parallel copy through the OS copy call on Windows (block clones on ReFS where Windows does them); never hard links. Deleting is retried while a just-exited Editor holds files (Windows), long paths use the `\\?\` prefix. Every restore is checked against the snapshot's manifest.
+- **Keyed reuse**: key = resolved project commit (or a digest of a plain copy's files), full Editor version with revision, backend and build settings, package lock digest, injected package digest, prepare step digest (commands, the files they name, `project.prepare_inputs`) and the live copy's path. A matching entry whose files were modified is discarded and prepared again.
+- `unity-bench cache list` and `cache prune [--older-than 30d] [--keep N] [--dry-run]`.
+- `project.prepare_inputs` (files and directories the prepare commands depend on) and the `[cache]` table (`isolate`).
+- **Report and results**: `prepared: reused <key>` or `prepared: built (N s)` per variant; the start state of every workload (`warm (snapshot <key>)`, `cold (Library removed; isolated: ...)`), restore times, and the Editor's own count of assets imported at open. `results.jsonl` gets `state` on process rows and `prepare` rows; `campaign.json` gets `cache` and `provenance.variants.<id>.prepared`; `summary.json` gets `states`. All additive, schema 1 (see [docs/adapters.md](docs/adapters.md#what-the-runner-adds-to-resultsjsonl-and-summaryjson-v04-additive)).
+- Per process, the settings files the Editor rewrote (`settings_changed`) are listed.
+
+Documentation: [methodology: Cache states](docs/methodology.md#cache-states) (what each state is, which caches `cold` isolates per OS, with evidence, and what is not controlled).
+
 ## 0.3.0
 
 Fixes from two independent reviews of v0.2 and its first Windows campaign. Philosophy unchanged: annotate, do not refuse. Results rendered by 0.3.0 can differ from 0.2.0 renderings of the same `results.jsonl` for the reasons marked **(changes numbers or text)**.

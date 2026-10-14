@@ -2,16 +2,21 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 from unity_bench import cli, runner, summary, workspace  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).parent))
+import testenv  # noqa: E402,F401  (first: keeps the cache directory out of the user's real one)
 
 FAKE = str(Path(__file__).with_name('fake_unity.py'))
 
@@ -20,10 +25,18 @@ def editor(*options):
     return [sys.executable, FAKE, *options]
 
 
+def work_dir(out):
+    """Where the run kept its project copies: the cache's work directory, recorded in campaign.json."""
+    return Path(json.loads((Path(out) / 'campaign.json').read_text())['cache']['work'])
+
+
 class RunnerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)
+        patch = mock.patch.dict(os.environ, {'UNITY_BENCH_CACHE_DIR': str(self.tmp / 'cache')})   # a test never touches the user's real cache
+        patch.start()
+        self.addCleanup(patch.stop)
         (self.tmp / 'proj/Assets').mkdir(parents=True)
         (self.tmp / 'proj/Assets/A.cs').write_text('class A {}\n')
         (self.tmp / 'proj/ProjectSettings').mkdir()
@@ -79,7 +92,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_failures_and_timeouts_are_recorded_and_the_schedule_continues(self):
         path = self.campaign([{'id': 'ok', 'editor': editor()}, {'id': 'bad', 'editor': editor('--fail')}, {'id': 'slow', 'editor': editor('--hang')}],
-                             [{'id': 'adapter', 'kind': 'editor.adapter', 'method': 'Some.Type.Run', 'repeats': 1, 'timeout_seconds': 2}])
+                             [{'id': 'adapter', 'kind': 'editor.adapter', 'method': 'Some.Type.Run', 'repeats': 1, 'timeout_seconds': 2}], build_timeout_seconds=2)
         out, rows = self.run_campaign(path)
         status = {r['variant']: (r['status'], r['error']) for r in rows if r['type'] == 'process'}
         self.assertEqual(status['ok'][0], 'ok')
@@ -108,7 +121,7 @@ class RunnerTests(unittest.TestCase):
     def test_package_is_injected_into_the_copy_not_the_source(self):
         path = self.campaign([{'id': 'a', 'editor': editor()}], [{'id': 'w', 'kind': 'editor.warm_open', 'repeats': 1}])
         out, _ = self.run_campaign(path, keep_work=True)
-        self.assertTrue((out / 'work/a/Packages' / workspace.PACKAGE_NAME / 'package.json').is_file())
+        self.assertTrue((work_dir(out) / 'a/Packages' / workspace.PACKAGE_NAME / 'package.json').is_file())
         self.assertFalse((self.tmp / 'proj/Packages').exists())
 
     def test_read_result_rejects_bad_files(self):
@@ -210,10 +223,10 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual((copy['commit'], copy['mode'], copy['dirty_files']), (head, 'copy', 1))
         self.assertEqual(wt['package'], "replaced the project's embedded copy")
         framework = record['provenance']['framework']
-        self.assertEqual(framework['version'], '0.3.0')
+        self.assertEqual(framework['version'], '0.4.0')
         self.assertTrue(framework['commit'] is None or isinstance(framework['commit'], str))
         for variant in ('wt', 'copy'):
-            package = out / 'work' / variant / ('unity/' if variant == 'wt' else '') / 'Packages' / workspace.PACKAGE_NAME
+            package = work_dir(out) / variant / ('unity/' if variant == 'wt' else '') / 'Packages' / workspace.PACKAGE_NAME
             self.assertTrue((package / 'package.json').is_file())
             self.assertFalse((package / 'stale.txt').exists())                         # the embedded copy was replaced, not merged or an error
         md = (out / 'summary.md').read_text()
@@ -245,7 +258,7 @@ class RunnerTests(unittest.TestCase):
         from unity_bench.report import write_reports
         s = write_reports(out, include_differing=True, bootstrap=50, first_use_ratios=True)
         self.assertEqual(s['options'], {'exclude_first_use': True, 'include_differing': True, 'bootstrap': 50, 'resolution_ms': 0.001, 'first_use_ratios': True})
-        self.assertEqual(s['report']['framework']['version'], '0.3.0')
+        self.assertEqual(s['report']['framework']['version'], '0.4.0')
         md = (out / 'summary.md').read_text()
         self.assertIn('--include-differing --first-use-ratios --bootstrap 50', md)
         self.assertIn('95% CI (bootstrap)', md)

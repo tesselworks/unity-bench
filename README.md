@@ -4,7 +4,7 @@ Compare the same Unity project across Editor versions or player scripting backen
 
 It was built for a Unity 6.7 (Mono) vs Unity 7 (CoreCLR) comparison. MatterKit, a physics and fracture library, is the first consumer: its scenarios plug in as Editor and player adapters (the MatterKit source is private, so those adapters live in its own repository). License: MIT.
 
-What it does differently from a strict benchmark harness: it **annotates instead of refusing**. Host CPU and memory are recorded next to each measurement; work and output hashes are compared and flagged, with the coverage that backs "same"; first-use samples are labelled; every run records the commits, Editors and player settings that produced it. Nothing blocks a run and nothing is deleted. See [docs/methodology.md](docs/methodology.md), including how to read a report and how to regenerate a published one from its raw data.
+What it does differently from a strict benchmark harness: it **annotates instead of refusing**. Host CPU and memory are recorded next to each measurement; work and output hashes are compared and flagged, with the coverage that backs "same"; first-use samples are labelled; every run records the commits, Editors and player settings that produced it. Nothing blocks a run and nothing is deleted. Cache state is a core feature: every workload names its start state (`cold`, `warm`, `as-is`), prepared project copies are snapshotted and reused between campaigns and runs, and the state each process really had is recorded. See [docs/methodology.md](docs/methodology.md), including how to read a report and how to regenerate a published one from its raw data.
 
 ## Quickstart (about 5 minutes)
 
@@ -30,6 +30,8 @@ You need Python 3.11+, one or more Unity Editors with a valid license, and eithe
    ```sh
    python3 unity-bench.py report bench-runs/minimal-example-... --first-use-ratios --bootstrap 1000
    ```
+
+5. Run it again. The second run does not prepare the project copies: it restores the prepared copies from the cache (`prepared: reused <key>` in the report), and `unity-bench cache list` shows what is kept. A workload can say where each of its processes starts (`state = "cold" | "warm" | "as-is"`, see [methodology](docs/methodology.md#cache-states)); `warm` puts the prepared copy back before every process, `cold` also isolates the global caches Unity lets us isolate.
 
 To measure your own project: point `[project] path` at it, list your Editors under `[[variants]]`, and keep the workloads you want. Say which items are the result with `headline` on a workload; there is no aggregate over everything. For project-specific work, write an [adapter](docs/adapters.md).
 
@@ -71,7 +73,8 @@ The full report also lists the variants with their resolved project commits and 
 - The Editor runs in `-batchmode -nographics`: no window, no GPU, no Inspector. Play Mode "frames" are updates, and player startup is headless by default and measures a probe frame, not a presented one.
 - n is small. The report gives medians, ranges, "ranges separate" with n on both sides and the chance of that with no real difference (33% for 2 vs 2); it is not a significance test, and `--bootstrap` intervals are descriptive.
 - Built-in Editor workloads measure the Editor on your project, not Unity in isolation.
-- A newer Editor migrates the project on its first open; that sample is labelled first-use and excluded from the summary by default.
+- A newer Editor migrates the project on its first open. Since v0.4 that happens in an untimed priming open, not in a measured sample; `--no-cache` brings back the old behaviour, where that sample is labelled first-use.
+- `cold` isolates what Unity lets us isolate (compilation cache, Package Manager cache, Accelerator, `Library`); the OS file cache, the GPU driver's shader cache and the GI cache are not controlled ([methodology](docs/methodology.md#cache-states)).
 - Player adapters run a built player per repeat and a build per variant, so they are slow to schedule; tail percentiles of a single process are noisy, and the report shows their range across processes rather than a single number.
 - Windows process ownership is verified by CI mocks and native tests on `windows-latest`; Unity workloads have been run on macOS (Apple silicon) and Windows (x64) with Unity 6000.7.0b2 and 7000.0.0a7.
 

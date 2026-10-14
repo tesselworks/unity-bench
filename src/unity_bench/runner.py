@@ -10,9 +10,10 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
-from . import __version__, config, host_sampling, process, provenance, reload_log, workspace
+from . import __version__, cache, config, fastcopy, host_sampling, process, provenance, reload_log, states, workspace
 from .report import write_reports
 from .distributions import finite
 from .result import ResultError, read_result  # noqa: F401  (ResultError is part of this module's interface)
@@ -30,6 +31,9 @@ class Campaign:
         self.variants = {v['id']: v for v in cfg['variants']}
         self.workloads = {w['id']: w for w in cfg['workloads']}
         self.projects, self.worktrees = {}, {}
+        self.store = None   # cache.Store when prepared copies are cached or snapshotted, else None (v0.3 behaviour)
+        self.prepared = {}   # variant id -> what preparing it was: status (reused/built), key, snapshot entry, seconds
+        self.launch_env, self.launch_args = {}, []   # the start state of the process being run: environment and Editor arguments for the cold isolation
         self.builds = {}   # (build key, variant id) -> player executable; see build_key
         self.build_settings = {}   # same keys -> the player build settings the Editor reported
         self.results = None
@@ -45,10 +49,16 @@ class Campaign:
         project = self.projects[v['id']]
         stem = f"{row['index']:04d}-{w['id']}-{v['id']}"
         base = {'index': row['index'], 'workload': w['id'], 'kind': w['kind'], 'variant': v['id'], 'repeat': row['repeat']}
-        saved = workspace.snapshot(project, [self.target_file(t, v) for t in w.get('targets', [])] + ['ProjectSettings/EditorSettings.asset'])
         sampler = host_sampling.Sampler()
         started = time.time()
         outcome = new_outcome()
+        state, scratch = None, None
+        try:
+            state, scratch = self.start_state(w, v, project, row)
+        except Exception as error:   # a state that could not be set up is recorded; the process still runs from what is there
+            state = {'requested': w.get('state') or states.default_state(w['kind']), 'actual': 'as-is', 'notes': [f'{type(error).__name__}: {error}']}
+        saved = workspace.snapshot(project, [self.target_file(t, v) for t in w.get('targets', [])] + ['ProjectSettings/EditorSettings.asset'])
+        settings_before = cache.settings_digests(project)
         try:
             if w['kind'] in ('editor.cold_open', 'editor.warm_open'):
                 self.open_project(w, v, project, row, stem, sampler, outcome)
@@ -58,9 +68,23 @@ class Campaign:
                 self.batch(w, v, project, row, stem, sampler, outcome)
         except Exception as error:   # one bad process, result file or adapter must never stop the schedule
             outcome['error'] = outcome['error'] or f'{type(error).__name__}: {error}'
+        finally:
+            self.launch_env, self.launch_args = {}, []
+            if scratch:
+                try:
+                    fastcopy.remove_tree(scratch, attempts=3)
+                except OSError:
+                    pass
         restored = workspace.restore(project, saved)
+        changed = cache.settings_changed(settings_before, cache.settings_digests(project))
+        if state is not None and changed:
+            state['settings_changed'] = changed   # the Editor rewrote its own settings files during this process
+        if state is not None and log.exists():
+            imports = states.initial_import(log)
+            if imports:
+                state['imports'] = imports
         status = 'ok' if outcome['error'] is None else 'timeout' if outcome['timed_out'] else 'failed'
-        self.write({'type': 'process', **base, 'status': status, 'error': outcome['error'], 'exit_code': outcome['exit_code'],
+        self.write({'type': 'process', **base, 'status': status, 'error': outcome['error'], 'exit_code': outcome['exit_code'], 'state': state,
                     'wall_ms': outcome['wall_ms'], 'environment': outcome['environment'], 'notes': outcome['notes'], 'build': outcome['build'],
                     'headline': outcome['headline'], 'cleanup': outcome['cleanup'], 'host': sampler.summary(), 'restored_files': restored,
                     'started_at': datetime.datetime.fromtimestamp(started).isoformat(timespec='seconds'), 'log': f'logs/{stem}.log' if log.exists() else None})
@@ -74,7 +98,62 @@ class Campaign:
 
     def editor_command(self, v, project, log, extra):
         editor = [v['editor']] if isinstance(v['editor'], str) else list(v['editor'])
-        return [*editor, *EDITOR_ARGS, '-projectPath', str(project), '-logFile', str(log), *extra]
+        return [*editor, *EDITOR_ARGS, '-projectPath', str(project), '-logFile', str(log), *extra, *self.launch_args]
+
+    def launch(self, argv, cwd, timeout, sampler=None):
+        """Run one owned process with the start state's environment (the cold isolation of global caches) in force."""
+        with states.environment(self.launch_env):
+            return process.run(argv, cwd, timeout, sampler.sample if sampler else None)
+
+    def start_state(self, w, v, project, row):
+        """Put the project copy into the workload's start state. Returns (the record stored with the process, a scratch directory to delete afterwards).
+
+        cold: Library is deleted and the cold isolation of global caches is set up for this one process.
+        warm: the copy goes back to the snapshot taken after it was prepared and imported. Without a snapshot the process runs as-is and says so.
+        as-is: nothing.
+        """
+        if w['kind'] not in states.STATE_KINDS:
+            return None, None
+        requested = w.get('state') or states.default_state(w['kind'])
+        state = {'requested': requested, 'actual': requested, 'notes': []}
+        if requested == 'cold':
+            workspace.remove_library(project)
+            isolate = self.cfg['cache']['isolate']
+            scratch = tempfile.mkdtemp(prefix='ub-cold-')
+            self.launch_env, self.launch_args, described = states.cold_isolation(scratch, isolate)
+            state.update(library_removed=True, isolated=described)
+            return state, scratch
+        if requested == 'warm':
+            prepared = self.prepared.get(v['id']) or {}
+            entry = prepared.get('entry')
+            if entry is None:
+                state.update(actual='as-is')
+                state['notes'].append('no snapshot of this copy exists' + (f": {prepared['note']}" if prepared.get('note') else ''))
+                return state, None
+            state.update(self.restore(entry, v, project))
+            state['snapshot'] = entry.key
+        return state, None
+
+    def restore(self, entry, v, project):
+        """Put the live copy back to `entry`'s snapshot and check it against the snapshot's manifest. Returns the state fields describing it."""
+        worktree = self.worktrees[v['id']]
+        root = Path(worktree[1] if worktree else project)
+        relative = entry.meta.get('project_relative', '.')
+        start = time.perf_counter()
+        result = workspace.restore_root(entry.tree, root)
+        verified, diff = False, []
+        for attempt in range(2):
+            diff = cache.manifest_diff(entry.meta['manifest'], cache.manifest(root, relative))
+            verified = not diff
+            if verified:
+                break
+            result = workspace.restore_root(entry.tree, root)   # something resisted (a file still open): once more
+        out = {'restore_ms': round((time.perf_counter() - start) * 1000), 'restore_method': result['method'], 'verified': verified}
+        if result['retries']:
+            out['delete_retries'] = result['retries']
+        if not verified:
+            out['notes'] = ['the restored copy differs from the snapshot in: ' + ', '.join(diff)]
+        return out
 
     def finish_run(self, run, outcome):
         outcome.update(exit_code=run.exit_code, wall_ms=run.wall_ms, timed_out=run.timed_out, cleanup=run.cleanup)
@@ -84,9 +163,7 @@ class Campaign:
             outcome['error'] = f'exit code {run.exit_code}'
 
     def open_project(self, w, v, project, row, stem, sampler, outcome):
-        if w['kind'] == 'editor.cold_open':
-            workspace.remove_library(project)
-        run = process.run(self.editor_command(v, project, self.out / 'logs' / f'{stem}.log', ['-quit']), project, w['timeout_seconds'], sampler.sample)
+        run = self.launch(self.editor_command(v, project, self.out / 'logs' / f'{stem}.log', ['-quit']), project, w['timeout_seconds'], sampler)
         self.finish_run(run, outcome)
         if run.ok:
             # The first open of a variant's project copy also imports and, on a newer Editor, migrates it.
@@ -107,8 +184,8 @@ class Campaign:
     def batch(self, w, v, project, row, stem, sampler, outcome, output=None):
         req, path = self.request(w, v, row, stem, output)
         log = self.out / 'logs' / f'{stem}.log'
-        run = process.run(self.editor_command(v, project, log, ['-executeMethod', BATCH_METHOD, '-unityBenchRequest', str(path)]),
-                          project, w['timeout_seconds'], sampler.sample)
+        run = self.launch(self.editor_command(v, project, log, ['-executeMethod', BATCH_METHOD, '-unityBenchRequest', str(path)]),
+                          project, w['timeout_seconds'], sampler)
         self.finish_run(run, outcome)
         if outcome['error']:
             # A failed process often wrote a result with the reason.
@@ -132,6 +209,95 @@ class Campaign:
         if target['root'] == 'worktree':
             return str(Path(self.worktrees[v['id']][1]) / target['path'])
         return target['path']
+
+    # ---- preparing a variant's copy -----------------------------------------------------------------------------
+
+    def prepare_variant(self, v, work, managed, record, log):
+        """Make the variant's project copy: from a cache entry when one matches, else copy or check out, inject the package, run `project.prepare`,
+        and (when prepared copies are cached or any workload starts `warm`) import it once in an untimed Editor open and snapshot it.
+
+        Sets self.projects / self.worktrees / self.prepared for the variant. The record of what happened is `self.prepared[id]`.
+        """
+        started = time.time()
+        store = self.store
+        prep = {'status': 'built', 'key': None, 'entry': None, 'note': None}
+        self.prepared[v['id']] = prep
+        target = workspace.target_path(work, v)
+        identity = key = parts = hashed = None
+        if store:
+            identity = workspace.source_identity(self.cfg, v)
+            editor = cache.editor_identity(v['editor'])
+            parts, hashed = cache.components(self.cfg, v, target, identity, editor, workspace.injected_digest(self.cfg))
+            key = cache.key_of(parts)
+            prep.update(key=key, editor=editor['full'], cache_dir=str(store.root) if store.persistent else None)
+            entry, why = store.lookup(key)
+            if entry is not None:
+                log(f"preparing {v['id']}: reusing prepared copy {key}")
+                try:
+                    project, worktree, info, result = workspace.materialize(self.cfg, v, work, entry, managed)
+                except (OSError, subprocess.CalledProcessError) as error:   # a full disk or a locked file: prepare it the long way instead of failing the run
+                    why = f'the cached copy could not be restored: {type(error).__name__}: {error}'
+                    fastcopy.remove_tree(target, attempts=3)
+                    subprocess.run(['git', '-C', str(self.cfg['project']['repository'] or self.cfg['project']['path']), 'worktree', 'prune'], capture_output=True)
+                else:
+                    self.projects[v['id']], self.worktrees[v['id']] = project, worktree
+                    store.touch(entry)
+                    prep.update(status='reused', entry=entry, seconds=round(time.time() - started, 2), method=result['method'], built_seconds=entry.meta.get('built_seconds'))
+                    record['provenance']['variants'][v['id']] = {**info, 'prepared': public(prep)}
+                    return
+            if why not in ('no entry', 'reuse is off'):
+                prep['rebuilt_because'] = why
+                log(f"preparing {v['id']}: cached copy {key} is not usable ({why}); preparing again")
+                if entry is None:
+                    store.discard(key)
+        log(f"preparing {v['id']}")
+        project, worktree, info = workspace.create(self.cfg, v, work, commit=(identity or {}).get('commit') if v.get('revision') else None, managed=managed)
+        self.projects[v['id']], self.worktrees[v['id']] = project, worktree
+        record['provenance']['variants'][v['id']] = info
+        write_campaign(self.out, record)   # the resolved commits are known as soon as the copies exist
+        root = Path(worktree[1] if worktree else project)
+        prepare_project(self.cfg, v, root, project, self.out)
+        if store:
+            self.prime_and_snapshot(v, project, root, key, parts, hashed, info, prep, started, log)
+        prep['seconds'] = round(time.time() - started, 1)
+        info['prepared'] = public(prep)
+
+    def prime_and_snapshot(self, v, project, root, key, parts, hashed, info, prep, started, log):
+        """The untimed first open (import and, on a newer Editor, migration), then a snapshot of the result as cache entry `key`.
+
+        A failed or timed-out open leaves the copy as it is and no entry: a snapshot is only taken from a clean point (the Editor exited 0 and left no Temp).
+        """
+        stem = f"prime-{v['id']}"
+        sampler = host_sampling.Sampler()
+        before = cache.settings_digests(project)
+        self.launch_env, self.launch_args = {}, []
+        run = self.launch(self.editor_command(v, project, self.out / 'logs' / f'{stem}.log', ['-quit']), project, self.cfg['defaults']['build_timeout_seconds'], sampler)
+        failure = None if run.ok else ('timeout; process tree killed' if run.timed_out else f'exit code {run.exit_code}')
+        self.write({'type': 'prepare', 'role': 'prime', 'variant': v['id'], 'key': key, 'status': 'ok' if failure is None else 'failed', 'error': failure,
+                    'exit_code': run.exit_code, 'wall_ms': run.wall_ms, 'cleanup': run.cleanup, 'host': sampler.summary(), 'log': f'logs/{stem}.log'})
+        prep['prime_ms'] = run.wall_ms
+        if failure:
+            prep['note'] = f'the priming open failed ({failure}); the copy was not snapshotted or cached'
+            log(f"{v['id']}: {prep['note']}")
+            return
+        changed = cache.settings_changed(before, cache.settings_digests(project))
+        relative = Path(project).relative_to(root).as_posix() if Path(project) != root else '.'
+        try:
+            staged = self.store.staging(key)
+            workspace.snapshot_root(root, staged / 't')
+            data = cache.manifest(staged / 't', relative)
+            files, size = cache.tree_size(staged / 't')
+            meta = {'variant': v['id'], 'components': parts, 'project_relative': relative, 'mode': info.get('mode'), 'info': {k: x for k, x in info.items() if k != 'prepared'},
+                    'manifest': data, 'manifest_digest': cache.manifest_digest(data), 'built_seconds': round(time.time() - started, 1), 'prime_ms': run.wall_ms,
+                    'files': files, 'size_bytes': size, 'settings_changed_by_priming': changed[:30], 'prepare_inputs': hashed, 'framework': __version__}
+            entry = self.store.commit(staged, key, meta)
+        except OSError as error:
+            prep['note'] = f'snapshot failed: {error}'
+            log(f"{v['id']}: {prep['note']}")
+            return
+        prep['entry'] = entry
+        if changed:
+            prep['settings_changed_by_priming'] = changed[:30]
 
     # ---- players ------------------------------------------------------------------------------------------------
 
@@ -268,35 +434,48 @@ def prepare_project(cfg, variant, root, project, out):
             raise RuntimeError(f"prepare command {number} for {variant['id']} exited {done.returncode} (see {log})")
 
 
-def run_campaign(config_path, out, keep_work=False, only=None, work=None, log=print):
+def public(prep):
+    """The part of a variant's preparation record that goes into campaign.json."""
+    return {k: x for k, x in prep.items() if k != 'entry' and x is not None}
+
+
+def run_campaign(config_path, out, keep_work=False, only=None, work=None, log=print, cache_dir=None, use_cache=True):
     cfg = config.load(config_path)
     notes = []
     rows = config.schedule(cfg, only, notes)
     out = Path(out).resolve()
     if out.exists() and any(out.iterdir()):
         raise FileExistsError(f'{out} already exists and is not empty; results are never overwritten')
-    work = Path(work).resolve() if work else out / 'work'   # a short path helps on Windows, where Library paths get long
+    used = {r['variant'] for r in rows}
+    wants_warm = any(w.get('state') == 'warm' and set(w['variants']) & used for w in cfg['workloads'] if w['id'] in {r['workload'] for r in rows})
+    store = None
+    if use_cache:
+        store = cache.Store(Path(cache_dir).expanduser().resolve() if cache_dir else cache.default_cache_dir().resolve())
+    elif wants_warm:
+        store = cache.Store(out / 'snapshots', reuse=False, persistent=False)   # warm needs a snapshot to restore; nothing is kept for later runs
+    managed = bool(store and store.persistent and not work)
+    # Where the live copies go: the project path is part of the cache key (Unity's Library holds absolute paths), so the default is a fixed directory inside
+    # the cache, not the run directory; a short path helps on Windows, where Library paths get long.
+    work = Path(work).resolve() if work else (store.default_work if managed else out / 'work')
     for sub in ('logs', 'requests', 'results', 'signals'):
         (out / sub).mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
     campaign = Campaign(cfg, out)
+    campaign.store = store
     record = {'tool': 'unity-bench', 'version': __version__, 'campaign': cfg, 'schedule': rows, 'schedule_notes': notes, 'host': host_sampling.describe(),
+              'cache': {'enabled': bool(store and store.persistent), 'dir': str(store.root) if store and store.persistent else None, 'work': str(work),
+                        'isolate': cfg['cache']['isolate']},
               'provenance': {'framework': provenance.framework(), 'variants': {}}, 'started_at': datetime.datetime.now().isoformat(timespec='seconds')}
     write_campaign(out, record)
     campaign.results = (out / 'results.jsonl').open('a', encoding='utf-8')
-    used = {r['variant'] for r in rows}
     for note in notes:
         log(note)
     try:
         for v in cfg['variants']:
             if v['id'] not in used:
                 continue
-            log(f"preparing {v['id']}")
-            campaign.projects[v['id']], campaign.worktrees[v['id']], info = workspace.create(cfg, v, work)
-            record['provenance']['variants'][v['id']] = info
-            write_campaign(out, record)   # the resolved commits are known as soon as the copies exist
-            worktree = campaign.worktrees[v['id']]
-            prepare_project(cfg, v, worktree[1] if worktree else campaign.projects[v['id']], campaign.projects[v['id']], out)
+            campaign.prepare_variant(v, work, managed, record, log)
+            write_campaign(out, record)
         for row in rows:
             w = campaign.workloads[row['workload']]
             stem = f"{row['index']:04d}-{row['workload']}-{row['variant']}"
@@ -311,6 +490,8 @@ def run_campaign(config_path, out, keep_work=False, only=None, work=None, log=pr
                 write_campaign(out, record)
                 log('could not remove (a process still has it open?): ' + ', '.join(left))
             shutil.rmtree(out / 'builds', ignore_errors=True)   # built players are binaries; --keep-work keeps them
+            if store and not store.persistent:
+                shutil.rmtree(store.root, ignore_errors=True)
             try:
                 work.rmdir()
             except OSError:

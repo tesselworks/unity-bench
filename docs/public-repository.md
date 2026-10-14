@@ -4,6 +4,7 @@ Short list to walk before tagging a release or announcing the repository.
 
 - [ ] `python3 -I -m unittest discover -s tests` passes in CI on Linux and Windows.
 - [ ] Run `examples/minimal.toml` (small `repeats`/`rounds`) on every Editor version named in the README. Every built-in Editor workload and the example adapter produce numbers; `player.build_time` and `player.startup` ran at least once per Editor.
+- [ ] Run `examples/minimal.toml` twice with the same cache directory: the second report says `prepared: reused <key>` for every variant, and `unity-bench cache list` shows the entries. `cold` logs show the isolated cache size (`Total cache size`) and an import count equal to the asset count.
 - [ ] The sample report in the README is from a real run, with n, machine and date stated (it was taken with v0.2 and re-formatted for v0.3; replace it with a v0.3 run).
 - [ ] No private project names beyond the allowed ones (MatterKit, Spill, described generically), no private repository links, no personal paths or hostnames, no credentials, in files, test fixtures or git history. The log fixtures in `tests/fixtures/` are short excerpts with project paths replaced.
 - [ ] `LICENSE` (MIT) present; `pyproject.toml` and README agree.
