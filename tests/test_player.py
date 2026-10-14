@@ -313,7 +313,7 @@ class SceneWorkloadTests(CampaignCase):
         self.assertEqual(failures(rows), [])
         request = json.loads(next((out / 'requests').glob('*scene-a.json')).read_text())
         self.assertEqual({p['k']: p['v'] for p in request['args']}, {'scene': 'Assets/Scenes/Bodies.unity', 'duration_frames': '100', 'warmup_frames': '30', 'vsync': 'false',
-                                                                       'list_markers': 'false', 'capture_delta': '0.02', 'fixed_timestep': '0.01'})
+                                                                       'list_markers': 'false', 'memory': 'true', 'capture_delta': '0.02', 'fixed_timestep': '0.01'})
         build = json.loads(next((out / 'requests').glob('*-build.json')).read_text())
         self.assertEqual(build['scenes'], ['Assets/Scenes/Bodies.unity'])
         self.assertEqual(setting(rows, 'setup-build')[0]['notes']['scenes'], 'Assets/Scenes/Bodies.unity')

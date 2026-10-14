@@ -42,7 +42,7 @@ namespace UnityBench.Editor
             s = JsonUtility.FromJson<State>(json);
             // A load after a compile finished is the reload an edit step waits for. A load during a Play Mode step is
             // the domain/code reload that entering or exiting Play Mode did cause; with reload disabled none happens.
-            if (s.started && !s.reloaded && (s.compileEnd != 0 || s.req.kind == "editor.play")) s.reloaded = true;
+            if (s.started && !s.reloaded && (s.compileEnd != 0 || IsPlay(s.req.kind))) s.reloaded = true;
             Save();
             Detach();
             EditorApplication.update += Tick;
@@ -89,7 +89,7 @@ namespace UnityBench.Editor
         static void Tick()
         {
             if (s == null || s.phase == "done") return;
-            try { Advance(); }
+            try { MemoryPoll(); Advance(); }
             catch (Exception e) { s.error = (e is TargetInvocationException && e.InnerException != null ? e.InnerException : e).ToString(); Complete(1); }
         }
 
@@ -126,6 +126,7 @@ namespace UnityBench.Editor
                     if (!Idle) return;
                     s.started = false;
                     BuildPlan();
+                    MemoryStart();
                     s.phase = "run"; s.stepStart = Now; Save();
                     return;
             }
@@ -137,6 +138,7 @@ namespace UnityBench.Editor
             switch (req.kind)
             {
                 case "editor.script_edit":
+                case "editor.reload_leak":
                     foreach (var t in req.targets)
                     {
                         var full = Path.Combine(ProjectRoot, t.path);
@@ -153,6 +155,7 @@ namespace UnityBench.Editor
                         }
                     break;
                 case "editor.play":
+                case "editor.play_leak":
                     PrepareScene(req.scene);
                     if (req.domainReload == "disabled")
                     {
@@ -181,6 +184,7 @@ namespace UnityBench.Editor
                 default:
                     throw new InvalidOperationException("Unknown workload kind " + req.kind);
             }
+            if (req.memorySnapshot && IsLeak(req.kind)) s.plan.Add(new Step { name = SnapshotStep, round = 0 });
         }
 
         static string ProjectRoot => Path.GetDirectoryName(Application.dataPath);
@@ -208,10 +212,13 @@ namespace UnityBench.Editor
         {
             if (s.cursor >= s.plan.Count) { Complete(0); return; }
             var step = s.plan[s.cursor];
+            if (step.name == SnapshotStep) { SnapshotStepRun(step); return; }
             switch (s.req.kind)
             {
-                case "editor.script_edit": EditStep(step); break;
-                case "editor.play": PlayStep(step); break;
+                case "editor.script_edit":
+                case "editor.reload_leak": EditStep(step); break;
+                case "editor.play":
+                case "editor.play_leak": PlayStep(step); break;
                 case "editor.adapter": AdapterStep(step); break;
                 case "editor.scene_play": SceneStep(step); break;
                 case "player.build_time": BuildStep(step); break;
@@ -229,6 +236,7 @@ namespace UnityBench.Editor
         static void End(Step step)
         {
             Mark("end", step);
+            MemoryStep();
             s.cursor++; s.started = false; s.stepStart = Now; Save();
         }
 
@@ -272,6 +280,7 @@ namespace UnityBench.Editor
                 AddSample(id + "/compile", Ms(s.stepStart, s.compileEnd), step.round, info);
                 AddSample(id + "/compile+reload", Ms(s.stepStart, Now), step.round, info);
             }
+            LeakPoint();   // after the reload an edit caused, restore steps included
             End(step);
         }
 
@@ -305,6 +314,7 @@ namespace UnityBench.Editor
                 if (s.enteredEdit != 0)
                 {
                     AddSample("play_exit", Ms(s.stepStart, s.enteredEdit), step.round, "reloaded", Flag(s.reloaded));
+                    LeakPoint();   // one reading per enter+exit cycle
                     End(step);
                 }
             }
@@ -374,7 +384,7 @@ namespace UnityBench.Editor
         static void OnCompilationFinished(object context)
         {
             if (s == null || !s.started || s.compileEnd != 0) return;
-            if (s.phase == "setup" || s.req.kind == "editor.script_edit") { s.compileEnd = Now; Save(); }
+            if (s.phase == "setup" || IsEdit(s.req.kind)) { s.compileEnd = Now; Save(); }
         }
 
         static void OnAssemblyCompiled(string assembly, CompilerMessage[] messages)
@@ -388,7 +398,7 @@ namespace UnityBench.Editor
 
         static void OnPlayMode(PlayModeStateChange change)
         {
-            if (s == null || !s.started || (s.req.kind != "editor.play" && s.req.kind != "editor.scene_play") || s.cursor >= s.plan.Count) return;
+            if (s == null || !s.started || (!IsPlay(s.req.kind) && s.req.kind != "editor.scene_play") || s.cursor >= s.plan.Count) return;
             var step = s.plan[s.cursor];
             if (change == PlayModeStateChange.EnteredPlayMode && step.name == "enter") { s.enteredPlay = Now; s.enteredFrame = Time.frameCount; Save(); }
             if (change == PlayModeStateChange.EnteredEditMode && step.name == "exit") { s.enteredEdit = Now; Save(); }
@@ -415,6 +425,7 @@ namespace UnityBench.Editor
                 }
             }
             catch { }
+            MemoryEnd();
             // The scene workload writes its own result (also when it failed, with the reason); the Editor's records have nothing to add to it.
             if (!(s.req.kind == "editor.scene_play" && s.sceneDone)) File.WriteAllText(s.req.outPath, ResultWriter.Build(s, code == 0));
             SessionState.EraseString(Key);

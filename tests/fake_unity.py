@@ -18,6 +18,9 @@ Behaviour is chosen by its own options, given before the Unity arguments:
   --scene-bodies N the scene workloads (player.scene, editor.scene_play) report the work counter bodies=N through a work group (a scene with hooks);
                    without it they report none ("work not verified")
   --scene-no-render  the scene workloads cannot record the rendering markers (headless-like)
+  --leak-mb F      the Editor workloads' memory readings grow by F MB per reload or Play Mode cycle (GC Used Memory; Unity native twice as fast)
+  --mem-missing N  comma-separated memory counters this Editor does not offer (they are left out of the readings and listed in memory.missing)
+  --no-memory      the Editor reads no memory at all (an older package)
 """
 import argparse
 import hashlib
@@ -44,6 +47,9 @@ parser.add_argument('--player-bad-signal', action='store_true')
 parser.add_argument('--bad-result', default='')
 parser.add_argument('--scene-bodies', type=int, default=0)
 parser.add_argument('--scene-no-render', action='store_true')
+parser.add_argument('--leak-mb', type=float, default=0.0)
+parser.add_argument('--mem-missing', default='')
+parser.add_argument('--no-memory', action='store_true')
 parser.add_argument('--as-player', action='store_true')
 ours, unity = parser.parse_known_args()
 
@@ -111,6 +117,32 @@ def run_player():
     Path(arg('-unityBenchOut')).write_text(json.dumps(result))
 
 
+MB = 2**20
+MEMORY = [('GC Used Memory', 'bytes', 12 * MB), ('GC Reserved Memory', 'bytes', 16 * MB), ('Unity Native (Total Used - GC Used)', 'bytes', 200 * MB), ('Total Reserved Memory', 'bytes', 600 * MB),
+          ('Gfx Used Memory', 'bytes', 0), ('App Resident Memory', 'bytes', 450 * MB), ('Object Count', 'count', 900), ('.NET Heap Size', 'bytes', 14 * MB)]
+
+
+def readings(cycle):
+    """What the package's MemoryProbe would read after `cycle` reloads: levels that grow with --leak-mb (the managed heap by F, the native memory by 2F), minus the counters --mem-missing names."""
+    gone = set(filter(None, ours.mem_missing.split(',')))
+    grow = {'GC Used Memory': 1, 'GC Reserved Memory': 1, 'Unity Native (Total Used - GC Used)': 2, 'App Resident Memory': 3}
+    return [(name, unit, base + grow.get(name, 0) * ours.leak_mb * MB * cycle) for name, unit, base in MEMORY if name not in gone]
+
+
+def memory_samples(req, cycles):
+    """The memory samples an Editor workload writes: start, end and peak once, and for the leak kinds one series reading per cycle (round = its index)."""
+    if ours.no_memory or not req.get('memory', True):
+        return [], {}
+    out = []
+    for point, cycle in (('start', 0), ('end', cycles), ('peak', cycles)):
+        out += [{'name': f'mem/{point}/{name}', 'ms': value, 'unit': unit, 'phase': None, 'round': 0, 'info': {}, 'counters': {}} for name, unit, value in readings(cycle)]
+    if req['kind'] in ('editor.reload_leak', 'editor.play_leak'):
+        for cycle in range(1, cycles + 1):
+            out += [{'name': f'leak/{name}', 'ms': value, 'unit': unit, 'phase': None, 'round': cycle - 1, 'info': {}, 'counters': {}} for name, unit, value in readings(cycle)]
+    notes = {'memory.offered': ', '.join(f'{n} ({u})' for n, u, _ in MEMORY), 'memory.missing': ', '.join(filter(None, ours.mem_missing.split(',')))}
+    return out, notes
+
+
 def write_player(output_dir):
     """A launcher that behaves like the built player: the same script, in player mode, with this process's own options."""
     options = [sys.executable, str(Path(__file__).resolve()), '--as-player', '--scale', str(ours.scale), '--salt', ours.salt, '--salt-item', ours.salt_item]
@@ -160,7 +192,7 @@ if request_path:
                 salt = ours.salt if name == ours.salt_item else ''
                 samples.append({'name': name, 'phase': 'first-use' if r == 0 else 'warm', 'round': r, 'ms': ms * ours.scale * (3 if r == 0 else 1),
                                 'hash': digest(name + salt), 'counters': {'items': 100}, 'info': {}})
-    elif req['kind'] == 'editor.script_edit':
+    elif req['kind'] in ('editor.script_edit', 'editor.reload_leak'):
         for r in range(req['rounds']):
             for t in req['targets']:
                 lines += [f"[UnityBench] begin {t['id']} {r}", *block(1000), 'Asset Pipeline Refresh (id=0a0b): Total: 1.2 seconds - Initiated by X',
@@ -168,7 +200,15 @@ if request_path:
                 for suffix, ms in (('compile', 300.0), ('compile+reload', 1000.0)):
                     samples.append({'name': f"{t['id']}/{suffix}", 'phase': 'first-use' if r == 0 else 'warm', 'round': r, 'ms': ms * ours.scale,
                                     'hash': None, 'counters': {}, 'info': {'assemblies': 1, 'reloaded': True}})
+    elif req['kind'] in ('editor.play', 'editor.play_leak'):
+        for r in range(req['rounds']):
+            lines += [f'[UnityBench] begin enter {r}', *block(800), f'[UnityBench] end enter {r}']
+            for name, ms in (('play_enter', 800.0), ('play_exit', 300.0)):
+                samples.append({'name': name, 'phase': 'first-use' if r == 0 else 'warm', 'round': r, 'ms': ms * ours.scale, 'hash': None, 'counters': {}, 'info': {'reloaded': True}})
     notes = {}
+    mem, mem_notes = memory_samples(req, req['rounds']) if req['kind'] != 'editor.scene_play' else ([], {})
+    samples += mem
+    notes.update(mem_notes)
     if req['kind'] == 'editor.scene_play':
         Path(req['outPath']).write_text(json.dumps(scene_result({pair['k']: pair['v'] for pair in req['args']}, env)))
         log.write_text('\n'.join(lines) + '\n')

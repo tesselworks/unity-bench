@@ -14,7 +14,7 @@ import re
 
 STATES = ('cold', 'warm', 'as-is')
 DEFAULT_STATE = {'editor.cold_open': 'cold'}   # every other kind starts as-is, as before v0.4
-STATE_KINDS = ('editor.cold_open', 'editor.warm_open', 'editor.script_edit', 'editor.play', 'editor.adapter', 'editor.scene_play', 'player.build_time')   # kinds that start an Editor on the project
+STATE_KINDS = ('editor.cold_open', 'editor.warm_open', 'editor.script_edit', 'editor.play', 'editor.adapter', 'editor.scene_play', 'editor.reload_leak', 'editor.play_leak', 'player.build_time')   # kinds that start an Editor on the project
 
 # What `cold` can isolate, by the name a campaign's [cache].isolate uses.
 ISOLATE = {

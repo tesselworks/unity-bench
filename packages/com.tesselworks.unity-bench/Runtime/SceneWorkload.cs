@@ -74,7 +74,7 @@ namespace UnityBench.Player
             public int WarmupFrames, DurationFrames;          // 0 = not used
             public double WarmupSeconds, DurationSeconds;
             public float CaptureDelta, FixedTimestep;         // 0 = leave the project's
-            public bool VSync, ListMarkers;
+            public bool VSync, ListMarkers, Memory;
 
             public static Options From(PlayerContext ctx)
             {
@@ -88,6 +88,7 @@ namespace UnityBench.Player
                 o.FixedTimestep = (float)Num(ctx, "fixed_timestep", 0);
                 o.VSync = ctx.Arg("vsync", "false") == "true";
                 o.ListMarkers = ctx.Arg("list_markers", "false") == "true";
+                o.Memory = ctx.Arg("memory", "true") == "true";
                 return o;
             }
 
@@ -122,6 +123,7 @@ namespace UnityBench.Player
             var gc0 = new int[3];
             var gc1 = new int[3];
             long steadyTicks = 0;
+            var memory = new MemoryBreakdown();
             try
             {
                 if (!o.VSync) { QualitySettings.vSyncCount = 0; Application.targetFrameRate = -1; }
@@ -141,7 +143,7 @@ namespace UnityBench.Player
                 StartProbes(ctx, o, probes);
                 Bench.StartRecording();
                 var isSteady = o.WarmupFrames <= 0 && o.WarmupSeconds <= 0;
-                if (isSteady) { Bench.SetSteady(true); for (var g = 0; g < 3; g++) gc0[g] = GC.CollectionCount(g); }
+                if (isSteady) { Bench.SetSteady(true); for (var g = 0; g < 3; g++) gc0[g] = GC.CollectionCount(g); memory.ReadStart(o, probes); }
                 var last = Stopwatch.GetTimestamp();
                 var phaseStart = last;
                 var counted = 0;
@@ -160,6 +162,7 @@ namespace UnityBench.Player
                         isSteady = true; counted = 0; phaseStart = now;
                         Bench.SetSteady(true);
                         for (var g = 0; g < 3; g++) gc0[g] = GC.CollectionCount(g);
+                        if (memory.ReadStart(o, probes)) last = phaseStart = Stopwatch.GetTimestamp();   // the reading is not part of the first steady frame
                         continue;
                     }
                     steady.Add(ms);
@@ -167,6 +170,7 @@ namespace UnityBench.Player
                     if (Options.Over(o.DurationFrames, o.DurationSeconds, counted, now - phaseStart)) { steadyTicks = now - phaseStart; break; }
                 }
                 for (var g = 0; g < 3; g++) gc1[g] = GC.CollectionCount(g);
+                memory.ReadEnd(o);
             }
             finally
             {
@@ -177,7 +181,44 @@ namespace UnityBench.Player
                 QualitySettings.vSyncCount = savedVSync;
                 Application.targetFrameRate = savedTarget;
             }
-            Report(ctx, o, probes, warmup, steady, gc0, gc1, steadyTicks);
+            Report(ctx, o, probes, warmup, steady, gc0, gc1, steadyTicks, memory);
+        }
+
+        // The memory breakdown of the steady phase: a reading as the phase starts and one as it ends (MemoryProbe), and as the peak the largest level a gauge
+        // recorder saw in any steady frame (reading in the frame loop would allocate and disturb the per-frame numbers the workload exists to record).
+        sealed class MemoryBreakdown
+        {
+            List<MemoryValue> start, end;
+            readonly List<string> missing = new List<string>();
+
+            // Returns whether a reading was taken. The recorders' change-since-last-read baselines are reset afterwards, so the reading's own garbage is not charged to a frame.
+            public bool ReadStart(Options o, List<Probe> probes)
+            {
+                if (!o.Memory) return false;
+                start = MemoryProbe.Read(true, missing);
+                foreach (var p in probes) p.Read();
+                return true;
+            }
+
+            public void ReadEnd(Options o) { if (o.Memory) end = MemoryProbe.Read(true, missing); }
+
+            public void Report(PlayerContext ctx, List<Probe> probes, string group)
+            {
+                if (start == null || end == null) return;
+                foreach (var v in start) ctx.AddValue("mem/start/" + v.Name, v.Value, v.Unit, group);
+                foreach (var v in end) ctx.AddValue("mem/end/" + v.Name, v.Value, v.Unit, group);
+                foreach (var p in probes)
+                {
+                    if (!p.Gauge || p.Values.Count == 0) continue;
+                    var peak = 0.0;
+                    foreach (var x in p.Values) peak = Math.Max(peak, x);
+                    foreach (var v in start) if (v.Name == p.Name) peak = Math.Max(peak, v.Value);
+                    foreach (var v in end) if (v.Name == p.Name) peak = Math.Max(peak, v.Value);
+                    ctx.AddValue("mem/peak/" + p.Name, peak, p.Unit, group);
+                }
+                ctx.Note("memory.offered", string.Join(", ", MemoryProbe.Offered()));
+                ctx.Note("memory.missing", string.Join(", ", new HashSet<string>(missing)));
+            }
         }
 
         // ---- profiler recorders ------------------------------------------------------------------------------------
@@ -237,7 +278,7 @@ namespace UnityBench.Player
 
         // ---- the result --------------------------------------------------------------------------------------------
 
-        static void Report(PlayerContext ctx, Options o, List<Probe> probes, List<double> warmup, List<double> steady, int[] gc0, int[] gc1, long steadyTicks)
+        static void Report(PlayerContext ctx, Options o, List<Probe> probes, List<double> warmup, List<double> steady, int[] gc0, int[] gc1, long steadyTicks, MemoryBreakdown memory)
         {
             // Work identity comes only from what the game reported; frames and markers are never claimed as work.
             var snapshot = Bench.Take();
@@ -272,6 +313,7 @@ namespace UnityBench.Player
                 }
             }
             catch (Exception) { /* not available on every platform and backend */ }
+            memory.Report(ctx, probes, group);
 
             ctx.Note("scene", o.Scene);
             ctx.Note("frames.warmup", warmup.Count.ToString(CultureInfo.InvariantCulture));

@@ -19,6 +19,8 @@ KINDS = {
     'editor.warm_open': {'description': 'Open the project in batchmode with its Library, quit.'},
     'editor.script_edit': {'description': 'Edit a script, time compile and compile+reload+idle.', 'keys': {'targets'}},
     'editor.play': {'description': 'Enter and exit Play Mode.', 'keys': {'domain_reload', 'scene'}},
+    'editor.reload_leak': {'description': 'Edit a script and reload N times in one Editor, read memory after each reload.', 'keys': {'targets', 'force_gc', 'memory_snapshot'}},
+    'editor.play_leak': {'description': 'Enter and exit Play Mode N times in one Editor, read memory after each cycle.', 'keys': {'domain_reload', 'scene', 'force_gc', 'memory_snapshot'}},
     'editor.adapter': {'description': 'Run a project C# adapter inside the Editor.', 'keys': {'method', 'args'}},
     'player.build_time': {'description': 'BuildPipeline.BuildPlayer wall time.', 'keys': BUILD_KEYS | {'mode'}},
     'player.startup': {'description': 'Launch a built player until its first frame.', 'keys': BUILD_KEYS | {'build', 'headless', 'window', 'player_args', 'startup_timeout_seconds'}},
@@ -28,6 +30,9 @@ KINDS = {
                      'keys': (BUILD_KEYS - {'scenes'}) | SCENE_KEYS | {'headless', 'window', 'player_args'}},
 }
 SCENE_KINDS = ('editor.scene_play', 'player.scene')
+LEAK_KINDS = ('editor.reload_leak', 'editor.play_leak')   # N reloads or Play Mode cycles in one Editor, a memory reading after each
+LEAK_ROUNDS = {'editor.reload_leak': 30, 'editor.play_leak': 10}   # their default `rounds`: the campaign's generic default (a handful) would be too few for a slope
+MEMORY_KINDS = ('editor.script_edit', 'editor.play', 'editor.adapter', 'editor.scene_play', 'player.scene', 'player.build_time', *LEAK_KINDS)   # kinds that read memory inside the process
 COMMON_KEYS = {'id', 'kind', 'repeats', 'rounds', 'timeout_seconds', 'variants', 'headline'}
 VARIANT_KEYS = {'id', 'editor', 'unity_version', 'backend', 'code_optimization', 'revision', 'baseline', 'build'}
 BUILD_SETTING_KEYS = ('api_compatibility', 'il2cpp_code_generation', 'stripping')   # player build settings a campaign may hold equal across Editors
@@ -138,13 +143,16 @@ def validate(raw, base):
         require(w.get('kind') in KINDS, f'workload kind must be one of {", ".join(KINDS)}')
         require('state' not in w or w['kind'] in states.STATE_KINDS,
                 f"workload {w.get('id')}: state applies to workloads that start an Editor on the project; {w['kind']} runs a built player (set it on the build workload)")
-        unknown(w, COMMON_KEYS | KINDS[w['kind']].get('keys', set()) | ({'state'} if w['kind'] in states.STATE_KINDS else set()), 'workload ' + str(w.get('id')))
+        unknown(w, COMMON_KEYS | KINDS[w['kind']].get('keys', set()) | ({'state'} if w['kind'] in states.STATE_KINDS else set()) | ({'memory'} if w['kind'] in MEMORY_KINDS else set()),
+                'workload ' + str(w.get('id')))
         identifier(w.get('id'), 'workload.id')
         require(w['id'] not in wids, f'Duplicate workload {w["id"]}')
         wids.add(w['id'])
         merged = {k: defaults[k] for k in ('repeats', 'rounds', 'timeout_seconds')}
         if w['kind'] in ('player.build_time', 'player.startup'):
             merged['timeout_seconds'] = defaults['build_timeout_seconds']
+        if w['kind'] in LEAK_KINDS:
+            merged['rounds'] = LEAK_ROUNDS[w['kind']]
         merged.update(w)
         for key in ('repeats', 'rounds', 'timeout_seconds'):
             positive_int(merged[key], f'workload {w["id"]}.{key}')
@@ -162,7 +170,7 @@ def validate(raw, base):
             require(ref and ref[0]['kind'] == 'player.build_time' and workloads.index(ref[0]) < workloads.index(w),
                     f'workload {w["id"]}: build must name a player.build_time workload defined before it')
             require(set(w['variants']) <= set(ref[0]['variants']), f'workload {w["id"]}: build workload must cover the same variants')
-        if w['kind'] == 'editor.script_edit' and any(t['root'] == 'worktree' for t in w['targets']):
+        if w['kind'] in ('editor.script_edit', 'editor.reload_leak') and any(t['root'] == 'worktree' for t in w['targets']):
             require(set(w['variants']) <= revisions, f'workload {w["id"]}: targets with root = "worktree" need every selected variant to set a revision')
     return {'name': raw['name'], 'project': {'path': str(root), 'repository': str(repository) if repository else None, 'inject_package': inject,
                                              'prepare': prepare, 'prepare_inputs': prepare_inputs, 'campaign_dir': str(base.resolve())},
@@ -183,7 +191,16 @@ def check_kind(w):
     if kind in states.STATE_KINDS:
         w.setdefault('state', states.default_state(kind))
         require(w['state'] in states.STATES, f'workload {wid}: state must be one of {", ".join(states.STATES)}')
-    if kind == 'editor.script_edit':
+    if kind in MEMORY_KINDS:
+        w.setdefault('memory', True)
+        require(isinstance(w['memory'], bool), f'workload {wid}: memory must be a boolean')
+    if kind in LEAK_KINDS:
+        require(w['memory'], f'workload {wid}: {kind} reads memory after every cycle; memory = false leaves nothing to report')
+        require(w['rounds'] >= 3, f'workload {wid}: rounds must be at least 3 to fit a slope')
+        for key in ('force_gc', 'memory_snapshot'):
+            w.setdefault(key, key == 'force_gc')
+            require(isinstance(w[key], bool), f'workload {wid}: {key} must be a boolean')
+    if kind in ('editor.script_edit', 'editor.reload_leak'):
         targets = w.get('targets')
         require(isinstance(targets, list) and targets, f'workload {wid}: targets must be a non-empty list')
         seen = set()
@@ -198,7 +215,7 @@ def check_kind(w):
             require(t['change'] in TARGET_CHANGES, f'workload {wid}: target change must be one of {TARGET_CHANGES}')
             t.setdefault('root', 'project')   # 'worktree': path is relative to the variant's git worktree (for files outside the Unity project)
             require(t['root'] in TARGET_ROOTS, f'workload {wid}: target root must be one of {TARGET_ROOTS}')
-    elif kind == 'editor.play':
+    elif kind in ('editor.play', 'editor.play_leak'):
         w.setdefault('domain_reload', 'default')
         require(w['domain_reload'] in ('default', 'disabled'), f'workload {wid}: domain_reload must be default or disabled')
         w.setdefault('scene', None)

@@ -2,7 +2,7 @@
 
 All built-in workloads work on any Unity project. Editor workloads run `Unity -batchmode -nographics`. Those that need to act inside the Editor use the batch entry in `packages/com.tesselworks.unity-bench`, which the runner copies into each variant's project copy (`project.inject_package`, default on; a copy of the package the project already embeds is replaced, so the C# that runs belongs to this runner; the framework's copy comes from the installed wheel or from `packages/` in a source checkout). The package compiles unchanged on Unity 6.7 (Mono) and Unity 7 (CoreCLR); its `Runtime/` part is inert unless a player is started with the arguments below.
 
-Common workload keys: `id`, `kind`, `repeats` (fresh processes per variant), `rounds` (iterations inside one Editor or player process), `timeout_seconds`, `variants` (restrict to some variant ids), `headline` (`true`, or a list of item-name patterns such as `["leaf/*", "play_enter"]`: the items an aggregate may include; see [methodology](methodology.md#aggregates-are-for-headline-items-only)). Defaults come from `[defaults]`. `repeats` is raised to the next even number when a workload runs on more than two variants (balanced order, see [methodology](methodology.md#schedule)).
+Common workload keys: `id`, `kind`, `repeats` (fresh processes per variant), `rounds` (iterations inside one Editor or player process), `timeout_seconds`, `variants` (restrict to some variant ids), `memory` (`editor.script_edit`, `editor.play`, `editor.adapter`, the scene and leak workloads and `player.build_time`: read the process's memory counters at the start, at the end and at the peak, default `true`; see [Memory readings](#memory-readings)), `headline` (`true`, or a list of item-name patterns such as `["leaf/*", "play_enter"]`: the items an aggregate may include; see [methodology](methodology.md#aggregates-are-for-headline-items-only)). Defaults come from `[defaults]`. `repeats` is raised to the next even number when a workload runs on more than two variants (balanced order, see [methodology](methodology.md#schedule)).
 
 | Kind | Clock | Items reported | Notes |
 | --- | --- | --- | --- |
@@ -10,6 +10,8 @@ Common workload keys: `id`, `kind`, `repeats` (fresh processes per variant), `ro
 | `editor.warm_open` | whole Editor process | `open` | opens with the existing `Library`, quits. Repeat 0 is first-use |
 | `editor.script_edit` | stopwatch in the Editor | `<target>/compile`, `<target>/compile+reload` | edits a script, times compile and compile+reload+idle |
 | `editor.play` | stopwatch in the Editor | `play_enter`, `play_exit` | Play Mode transitions |
+| `editor.reload_leak` | readings after each reload | `<target>/compile`, `<target>/compile+reload`, memory slopes | N script edit + reload cycles in one Editor, memory read after each, see [below](#editorreload_leak-and-editorplay_leak) |
+| `editor.play_leak` | readings after each cycle | `play_enter`, `play_exit`, memory slopes | N Play Mode enter/exit cycles in one Editor, memory read after each |
 | `editor.adapter` | the adapter's own | the adapter's | see [adapters.md](adapters.md) |
 | `player.build_time` | stopwatch around `BuildPipeline.BuildPlayer` | `build` | clean or incremental |
 | `player.startup` | file timestamp from outside the player | `launch_to_probe`, `engine_to_probe`, `launch_to_exit` | launches a built player |
@@ -86,6 +88,42 @@ scene = "Assets/Scenes/Main.unity"   # optional; default is a generated scene wi
 ```
 
 Per round: `play_enter` is `EnterPlaymode()` until `EnteredPlayMode` plus one more update. `play_exit` is `ExitPlaymode()` until `EnteredEditMode`. The info columns show whether the Editor reloaded. `domain_reload = "default"` uses the project's own Enter Play Mode settings; `"disabled"` sets Enter Play Mode Options with Reload Domain off for that process and puts the project's setting back before exiting. A generated scene is created under `Assets/UnityBench/Generated` in the project copy. Note `play_enter` also includes whatever your project does on entering Play Mode, so it measures "Play in this project", not Unity's bare cost.
+
+## Memory readings
+
+Every Editor process that runs a built-in workload through the package (everything above except the two opens) and every scene workload reads the process's own memory counters and reports them next to its timings. They are **annotations**: the report shows them in a "Memory breakdown" table (managed heap / Unity native / graphics / process, with variant ratios) and they never enter an aggregate, unless the campaign marks them in `headline` (item names `mem/<start|end|peak>/<counter>`, for example `headline = ["mem/end/*"]`). Set `memory = false` on a workload to switch the readings off.
+
+- **start**: when the measured part begins (the plan is built and the Editor is idle); **end**: when the last step finished; **peak**: the largest value any reading saw. The Editor workloads read the Profiler API and the .NET GC about four times a second and the full set (with the `ProfilerRecorder` counters) at every step boundary, so the peak is the largest of those; it can miss a spike between two readings. The scene workloads read at the start and the end of the steady phase, and their peak is the largest level a gauge recorder (GC Used, GC Reserved, Total Used, App Resident) saw in any steady frame; they do not read inside the frame loop, which would allocate and disturb the per-frame numbers they exist to record.
+- **Process rows** (`Process RSS (runner)`, `Process tree RSS (runner)`, `Process tree Private (runner)`) come from the runner, via psutil, once a second, for every process including the opens and player launches: the launched process alone, the whole tree (an Editor starts a compiler server and import workers, so the tree is several times the Editor), and the tree's private memory where the OS lets us read it (Windows private bytes, Linux unique set size; macOS refuses it). A once-a-second sample is a lower bound of the peak.
+- Which counters exist depends on the Editor or player: a counter that is not offered is listed per variant in the report ("Not available here"), never an error. What each counter means, where it comes from and which Editors offer it: [methodology](methodology.md#memory-counters).
+
+## editor.reload_leak and editor.play_leak
+
+Does an Editor keep growing when the same code is reloaded again and again? One Editor process runs N cycles and reads its memory after every one; the report fits a line through the readings.
+
+```toml
+[[workloads]]
+id = "reload-leak"
+kind = "editor.reload_leak"
+targets = [{ id = "leaf", path = "Assets/FeatureA/FeatureA.cs", change = "comment" }]   # as editor.script_edit
+rounds = 30                 # the default; cycles per process. `repeats` fresh processes per variant, as always
+force_gc = true             # default: collect garbage before every reading (below)
+memory_snapshot = false     # true: a Memory Profiler .snap at the end of the process, if the project has com.unity.memoryprofiler
+
+[[workloads]]
+id = "play-leak"
+kind = "editor.play_leak"
+rounds = 10                 # the default; Play Mode enter + exit cycles
+domain_reload = "default"   # or "disabled", as editor.play
+```
+
+`editor.reload_leak` is `editor.script_edit` with a memory reading after each reload: the same edit, refresh, compile, reload and idle wait, the same restore step after an `api` edit, the same restoring of the files afterwards (the runner checks them too). It takes `targets` like `editor.script_edit`; with several targets a cycle edits each in turn and every reload is a point. Its time samples (`<target>/compile`, `<target>/compile+reload`) are reported as usual, so a reload that gets slower while memory grows shows up in the same table. `editor.play_leak` is `editor.play` with a reading after every exit. Both default to more rounds than the campaign's `rounds` (30 and 10); an explicit `rounds` on the workload overrides it, and at least 3 are needed for a fit.
+
+**What a point is.** After each reload (or Play Mode exit) the Editor is idle again; then, with `force_gc = true`, it runs `GC.Collect`, `GC.WaitForPendingFinalizers`, `GC.Collect` and `EditorUtility.UnloadUnusedAssetsImmediate`, and reads every counter ([methodology](methodology.md#memory-counters) lists them). The collection is there to take garbage that is merely not collected yet out of the series; what is left is what stayed referenced. It is not what a user's Editor would hold a moment after a reload, and it means the managed-heap numbers are a floor, not the working size. `force_gc = false` reads without it.
+
+**What the report says** per counter and variant (only the breakdown counters in `summary.md`, all of them in `summary.json` under `leak`): the first and the last reading, the least-squares slope per cycle (MB per cycle for bytes), the slope of the second half of the series (which leaves out start-up growth that has not settled), the range of the residuals around the fitted line, and the points and processes behind it. Each process is fitted on its own, the table shows the median over processes and the range of their slopes. A residual range that is large next to the slope says the series is not a line (steps, or a reserve that grows in chunks): read the first and last values and the second-half slope then.
+
+**Memory Profiler snapshot.** With `memory_snapshot = true` the last step takes a `.snap` with the engine's snapshot API and keeps it in `<run dir>/snapshots/`. The project must have the `com.unity.memoryprofiler` package (it is what opens the file; `1.1.12` compiled on both Editors, `1.1.6` did not on 6000.7.0b2); without it the process records `memory.snapshot: skipped: com.unity.memoryprofiler is not in the project` and carries on. Snapshots are large (about 65 MB for a Mono Editor and 225 MB for a CoreCLR one after four reloads of the example project) and are not part of the results.
 
 ## player.build_time
 

@@ -23,7 +23,7 @@ BATCH_METHOD = 'UnityBench.Editor.BatchEntry.Run'
 EDITOR_ARGS = ['-batchmode', '-nographics']
 PLAYER_KINDS = ('player.startup', 'player.adapter', 'player.scene')
 SCENE_METHOD = 'UnityBench.Player.SceneWorkload.Run'   # the built-in player entry point of the scene workloads (a player.adapter in the package)
-LOGGED_KINDS = ('editor.script_edit', 'editor.play', 'editor.adapter')   # kinds whose Editor.log has reload blocks to parse
+LOGGED_KINDS = ('editor.script_edit', 'editor.play', 'editor.adapter', 'editor.reload_leak', 'editor.play_leak')   # kinds whose Editor.log has reload blocks to parse
 
 
 class Campaign:
@@ -96,7 +96,15 @@ class Campaign:
                             **({'unit': s['unit']} if s.get('unit') else {})})
             for group in outcome['reloads']:
                 self.write({'type': 'reload', **base, **group})
+            self.write_process_memory(base, sampler.summary())
         return status
+
+    def write_process_memory(self, base, host):
+        """The process tree's peak memory as the runner saw it (psutil, once a second: a lower bound), as ordinary byte samples next to the ones the Unity side reports."""
+        for name, key in (('Process RSS (runner)', 'root_rss_max_mb'), ('Process tree RSS (runner)', 'tree_rss_max_mb'), ('Process tree Private (runner)', 'tree_private_max_mb')):
+            if host.get(key):
+                self.write({'type': 'sample', **base, 'name': 'mem/peak/' + name, 'phase': 'single', 'ms': host[key] * 2**20, 'round': 0, 'info': {}, 'counters': None,
+                            'hash': None, 'work_group': None, 'unit': 'bytes'})
 
     def editor_command(self, v, project, log, extra):
         editor = [v['editor']] if isinstance(v['editor'], str) else list(v['editor'])
@@ -177,6 +185,8 @@ class Campaign:
                'scene': w.get('scene') or '', 'method': w.get('method', ''),
                'args': text_args(scene_args(w) if w['kind'] in config.SCENE_KINDS else w.get('args', {})),
                'targets': [{'id': t['id'], 'change': t['change'], 'path': self.target_file(t, v)} for t in w.get('targets', [])],
+               'memory': bool(w.get('memory', True)), 'memorySnapshot': bool(w.get('memory_snapshot')), 'forceGc': bool(w.get('force_gc', True)),
+               'snapshotPath': str(self.out / 'snapshots' / f'{stem}.snap') if w.get('memory_snapshot') else '',
                'buildMode': w.get('mode', 'clean'), 'development': bool(w.get('development')), 'buildTarget': w.get('build_target') or '',
                'backend': (w.get('backend') or v['backend']) if w['kind'].startswith('player.') else '', 'scenes': w.get('scenes', []),
                'prebuild': w.get('prebuild') or '', **build_request(v), 'outputDir': str(self.out / 'builds' / v['id'] / (output or w['id']))}
@@ -402,7 +412,7 @@ def build_request(variant):
 
 def scene_args(w):
     """The scene workloads' keys as the flat args the Unity side reads (the same names, strings; `time.*` flattened)."""
-    keys = ('duration_seconds', 'duration_frames', 'warmup_seconds', 'warmup_frames', 'vsync', 'list_markers')
+    keys = ('duration_seconds', 'duration_frames', 'warmup_seconds', 'warmup_frames', 'vsync', 'list_markers', 'memory')
     return {'scene': w['scenes'][0] if w['kind'] == 'player.scene' else w['scene'], **{k: w[k] for k in keys if k in w}, **w.get('time', {})}
 
 

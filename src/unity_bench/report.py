@@ -7,7 +7,14 @@ from . import provenance
 from .stats import RESOLUTION_MS, chance_separation
 from .summary import SCENE_KINDS, read_rows, summarise
 
-ROUNDS_KINDS = ('editor.script_edit', 'editor.play', 'editor.adapter', 'player.build_time', 'player.adapter')   # kinds where `rounds` means something
+# The breakdown the report shows first, by group; every other counter a workload read is in a second table (memory) or in summary.json (leak). Names as MemoryProbe and the runner give them.
+MEMORY_GROUPS = (('managed heap', ('GC Used Memory', 'GC Reserved Memory', '.NET Heap Size', '.NET Committed')),
+                 ('Unity native', ('Unity Native (Total Used - GC Used)', 'Total Reserved Memory')),
+                 ('graphics', ('Gfx Used Memory', 'Gfx Driver (API)')),
+                 ('process', ('App Resident Memory', 'Process RSS (runner)', 'Process tree RSS (runner)', 'Process tree Private (runner)')),
+                 ('loaded code', ('Loaded Assemblies', 'AssemblyLoadContexts')),
+                 ('objects', ('Object Count',)))
+ROUNDS_KINDS = ('editor.script_edit', 'editor.play', 'editor.adapter', 'editor.reload_leak', 'editor.play_leak', 'player.build_time', 'player.adapter')   # kinds where `rounds` means something
 
 
 def ms(value):
@@ -359,6 +366,8 @@ def render_workload(w, summary, campaign, bases):
     else:
         lines.append('No steady-state samples.')
     lines += render_aggregate(w, bases, compared)
+    lines += render_memory(w, summary, bases, compared)
+    lines += render_leak(w)
     if w['differing']:
         lines += ['', f"**{len(w['differing'])} item(s) did different work or produced different output in every compared pair, or varied within a variant. They are excluded from the table and from any aggregate.** "
                   'Their timings are shown here for diagnosis only; a ratio between different work is not a speed comparison.', '']
@@ -386,6 +395,67 @@ def render_workload(w, summary, campaign, bases):
                 row.append(f"{b['median'] / a['median']:.2f}" if a and b and a['median'] else '-')
             body.append(row)
         lines += table(['Phase', *w['variants'], *[f'{v}/{bases[v]}' for v in compared]], body)
+    return lines
+
+
+def signed(value, unit):
+    """A slope or residual: bytes in MB (the unit of the issue's slopes), counts and times plain, always with a sign."""
+    return f'{value / 2**20:+.3f} MB' if unit == 'bytes' else f'{value:+.2f}' + (' ms' if unit == 'ms' else '')
+
+
+def render_memory(w, summary, bases, compared):
+    """The memory breakdown (managed heap / Unity native / graphics / process) of a workload, with ratios: an annotation, not a result, unless the campaign marks it headline."""
+    if not w['memory']:
+        return []
+    resolution = summary['options'].get('resolution_ms', 0.0)
+    by_name = {i['name']: i for i in w['memory']}
+    header = ['Group', 'Counter', 'Point', *[v + (' (A)' if v == summary['baseline'] else '') for v in w['variants']], *[f'{v}/{bases[v]}' for v in compared]]
+
+    def row(label, counter, point):
+        item = by_name.get(f'mem/{point}/{counter}')
+        if item is None:
+            return None
+        return [label, counter, point, *[cell(item['variants'].get(v), resolution=resolution, unit=item['unit']) for v in w['variants']], *[ratio_cell(item['ratios'].get(v), item['unit']) for v in compared]]
+
+    shown = {f'mem/{p}/{c}' for _, counters in MEMORY_GROUPS for c in counters for p in ('start', 'end', 'peak')}
+    body = [r for label, counters in MEMORY_GROUPS for c in counters for p in ('start', 'end', 'peak') if (r := row(label, c, p))]
+    lines = ['', f"Memory breakdown of `{w['workload']}` (annotation: read inside the process at the start and end of the measured part, peak = the largest level seen; "
+                 "the process rows are the runner's own once-a-second sample, a lower bound; ratios are other / baseline):", '']
+    lines += table(header, body) if body else ['No memory counters were recorded.']
+    other = [i for i in w['memory'] if i['name'] not in shown and i['name'].startswith('mem/end/')]
+    if other:
+        lines += ['', 'Other counters at the end of the process:', '']
+        lines += table(['Counter', *w['variants'], *[f'{v}/{bases[v]}' for v in compared]],
+                       [[i['name'][len('mem/end/'):], *[cell(i['variants'].get(v), resolution=resolution, unit=i['unit']) for v in w['variants']], *[ratio_cell(i['ratios'].get(v), i['unit']) for v in compared]]
+                        for i in other])
+    if w.get('memory_counters'):
+        lines += ['', 'Memory counters this process did not offer (listed, not an error):', '']
+        lines += table(['Variant', 'Not available here', 'Counters offered by the Editor or player'],
+                       [[v, ', '.join(m['missing']) or 'none', f"{len(m['offered'])} (Memory category, bytes and counts)"] for v, m in w['memory_counters'].items()])
+    return lines
+
+
+def render_leak(w):
+    """Per counter and variant: the first and last reading of the series after each reload or Play Mode cycle, and the least-squares slope per cycle with its residual range."""
+    if not w['leak']:
+        return []
+    shown = [(label, c) for label, counters in MEMORY_GROUPS for c in counters]
+    rows = {r['name']: r for r in w['leak']}
+    body = []
+    for label, counter in shown:
+        r = rows.get(counter)
+        for v, c in (r['cells'].items() if r else ()):
+            unit = r['unit']
+            body.append([label, counter, v, amount(c['first'], unit), amount(c['last'], unit), signed(c['slope'], unit) + ' [' + signed(c['slope_range'][0], unit) + ' to ' + signed(c['slope_range'][1], unit) + ']',
+                         signed(c['tail_slope'], unit) if c['tail_slope'] is not None else '-', signed(c['residual'][0], unit) + ' to ' + signed(c['residual'][1], unit), f"{c['points']} x {c['processes']}"])
+    lines = ['', f"Memory after each reload or Play Mode cycle of `{w['workload']}` (a collection is forced before every reading when `force_gc` is on; see methodology). First and last are "
+                 "the readings after the first and the last cycle; slope is the least-squares fit per cycle, in brackets the range over processes; second half fits the later half of the series; "
+                 "residual is the range of (reading - fitted line); points x processes:", '']
+    lines += table(['Group', 'Counter', 'Variant', 'First', 'Last', 'Slope per cycle (MB for bytes)', 'Slope, second half', 'Residual range', 'Points x processes'], body)
+    lines += ['', f"{len(w['leak'])} counters were read per cycle; all of them, with their slopes, are in `summary.json` (`leak`)."]
+    if w.get('snapshots'):
+        lines += ['', 'Memory Profiler snapshots taken at the end of each process (open them with the Memory Profiler package; they are large and not part of the results):', '']
+        lines += [f"- `{s['variant']}` process #{s['index']}: " + (f"`snapshots/{Path(s['result']).name}`" if s['result'].endswith('.snap') else s['result']) for s in w['snapshots']]
     return lines
 
 

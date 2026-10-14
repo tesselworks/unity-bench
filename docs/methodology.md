@@ -120,6 +120,74 @@ The scene workloads ([workloads.md](workloads.md#playerscene-and-editorscene_pla
 - In the Editor, profiler frames never close in batchmode, so `LastValue` stays 0 and the recorders accumulate. The workload detects that (a recorder with fewer than two completed samples) and takes the change since the previous frame. In a player it uses the recorder's own per-frame sample.
 - A free-running player (no `capture_delta`) was paced by the engine here: the frame time p50 was 0.200 ms on 6.7 and 0.100 ms on 7 (5 and 10 kHz), the same value in every process, so the frame time says how the engine waits, not what the scene costs. With `time.capture_delta` the frames are not paced (p50 about 0.3 ms). Rendering counters were not the same across Editors for the same scene in a Development player (`Triangles Count` about 26,600 on 6.7, 4 on 7); they are reported as read and not explained.
 
+## Memory counters
+
+The Editor workloads and the scene workloads read the process's own memory ([workloads.md](workloads.md#memory-readings)). A reading is a list of named values from four sources, and a source an Editor does not have is listed as missing, never an error. All of it is in bytes except counts and the one time.
+
+| Counter | What it is | Source |
+| --- | --- | --- |
+| `GC Used Memory`, `GC Reserved Memory` | the managed heap: bytes in live objects (and not yet collected garbage), and bytes the managed allocator holds from the OS | `ProfilerRecorder`, category Memory |
+| `Total Used Memory`, `Total Reserved Memory` | everything Unity's allocators hold: used = in live allocations, reserved = requested from the OS and kept for reuse. **Total Used includes GC Used** (checked: Total Used - GC Used equals `Profiler.GetTotalAllocatedMemoryLong` to a few KB on both Editors) | `ProfilerRecorder` |
+| `Unity Native (Total Used - GC Used)` | the table's "Unity native": Unity's own allocations outside the managed heap (engine, assets, loaded code and metadata, the Editor's data) | derived from the two above |
+| `Gfx Used Memory`, `Gfx Reserved Memory`, `Gfx Driver (API)` | graphics memory. 0 in a `-nographics` Editor | `ProfilerRecorder`; `Profiler.GetAllocatedMemoryForGraphicsDriver` |
+| `Audio`, `Video`, `Profiler`, `Physics` `Used` / `Reserved` | the subsystems' own pools | `ProfilerRecorder` |
+| `Texture`, `Mesh`, `Material`, `AnimationClip`, `AudioClip Memory` and their `Count`s, `Object Count`, `Asset Count`, `Game Object Count`, `Scene Object Count`, `Sprite Count`, `SpriteAtlas Count` | what is loaded; counts that grow per reload are objects that stayed | `ProfilerRecorder` |
+| `System Used Memory`, `App Resident Memory`, `App Committed Memory` | the process as the Editor sees it: resident set. On macOS it differs from psutil's RSS (the runner's `Process RSS`): Unity counts what the OS charges the process for, and the OS compresses pages under pressure, so the two can differ by hundreds of MB on a busy machine | `ProfilerRecorder` |
+| `Mono Used (API)`, `Mono Heap (API)`, `Unity Allocated (API)`, `Unity Reserved (API)` | the same quantities as GC Used, GC Reserved, Total Used - GC Used and Total Reserved, read live without a recorder: the **cross-check**. On both Editors they agreed with the recorders (the `Mono` in the name is historical: on a CoreCLR Editor `Mono Used` is the CLR heap Unity reports as GC Used) | `Profiler.GetMonoUsedSizeLong`, `GetMonoHeapSizeLong`, `GetTotalAllocatedMemoryLong`, `GetTotalReservedMemoryLong` |
+| `.NET GetTotalMemory` | the runtime's own estimate of managed bytes in use. On Mono it equals `GC Used Memory`; on CoreCLR it is larger (104 MB against 72 MB right after a reload in the example project): do not mix the two | `GC.GetTotalMemory(false)` |
+| `.NET Heap Size`, `.NET Fragmented`, `.NET Committed`, `.NET Promoted` | the CLR collector's view of its last collection: heap size, bytes lost to fragmentation, memory committed, bytes that survived. `GenerationInfo` and `PauseDurations` of `GCMemoryInfo` exist on CoreCLR but throw `NotSupportedException` there, so per-generation sizes are not read | `GC.GetGCMemoryInfo()`, by reflection |
+| `.NET Total Allocated`, `.NET GC Pause Total` | bytes allocated since the process started and time spent paused by the collector (ms) | `GC.GetTotalAllocatedBytes`, `GC.GetTotalPauseDuration`, by reflection |
+| `.NET GC Count gen0/gen1/gen2` | collections so far. On Mono (Boehm) every collection counts for all three generations alike | `GC.CollectionCount` |
+| `Loaded Assemblies`, `AssemblyLoadContexts` | code that is still in the process: `AppDomain.GetAssemblies().Length` (Unity warns, UAC0005, that this can include assemblies already unloaded) and the number of `AssemblyLoadContext`s (CoreCLR). A count that rises with every reload means old code was not unloaded | `AppDomain`; `AssemblyLoadContext.All` by reflection |
+| `Process RSS (runner)`, `Process tree RSS (runner)`, `Process tree Private (runner)` | resident set of the launched process (the Editor), of it and all its children (compiler server, import workers; whatever psutil sees under the process), and the tree's private memory | psutil from the runner, once a second |
+
+Names are exactly the ones in the report and in `results.jsonl` (`mem/<start|end|peak>/<name>`, `leak/<name>`). Only the counters the Editor offers are read: the full list of the Memory category is stored per process (`memory.offered` in the process notes) and the wanted counters it lacked in `memory.missing`.
+
+**Used and reserved.** Used is what is live; reserved is what the allocator took from the OS and keeps. After a collection the managed heap's used size falls and its reserved size usually does not (neither Mono nor the CLR returns every block), and Unity's reserved memory moves in large steps. A growing reserved size with a flat used size is fragmentation or caching; a growing used size is objects that stayed. The reload slopes are given for both, and the used ones are the leak.
+
+**The forced collection.** Before every reading of a reload or Play Mode series the Editor runs `GC.Collect()`, `GC.WaitForPendingFinalizers()`, `GC.Collect()` and `EditorUtility.UnloadUnusedAssetsImmediate()` (`force_gc = true`, the default). Without it the series would mostly measure when the collector happened to run. With it, what is left is what is still referenced, which is the question of a leak, and it is smaller than what a normal Editor holds: managed used and reserved sizes are floors, a user's Editor sits above them. The `start`, `end` and `peak` readings of ordinary workloads are not preceded by a collection; they are what the process held.
+
+**The slope.** A series is one reading per reload (`leak/<counter>`, `round` = the reload's index). Each process is fitted by ordinary least squares against the index, giving a slope per reload, an intercept and the range of the residuals (reading minus fitted value). The report takes the median of the processes' slopes (their range is printed beside it), the median first and last readings, and a second slope fitted on the later half of the series only. It is a description of the growth in this Editor on this project, not a significance test: with `repeats = 2` there are two slopes to compare, and a residual range as large as the whole growth means the series is steps or noise, not a line.
+
+**Peak.** The largest value among the readings (see [workloads.md](workloads.md#memory-readings)). Counters that only grow (`.NET Total Allocated`, `.NET GC Pause Total`, `.NET GC Count`) have no peak row.
+
+### Memory counters per runtime
+
+Verified on macOS (Apple silicon), 6000.7.0b2 (Mono 6.13) and 7000.0.0a7 (.NET 10.0.10-dev), batchmode `-nographics`, example project.
+
+| Source | Counter | 6000.7.0b2 (Mono 6.13) | 7000.0.0a7 (.NET 10, CoreCLR) |
+| --- | --- | --- | --- |
+| `ProfilerRecorder`, category Memory | 33 bytes and count counters: GC, Total, Gfx, Audio, Video, Profiler and Physics Used/Reserved, System Used, App Resident, App Committed, Texture/Mesh/Material/AnimationClip/AudioClip Memory and Count, Object, Asset, Game Object, Scene Object, Sprite and SpriteAtlas Count | all 33 | all 33, the same list |
+| `ProfilerRecorder`, category Memory | `GC Allocated In Frame`, `GC Allocation In Frame Count` (per frame), `System Total Used Memory` (the whole machine) | offered, not read for the breakdown | offered, not read |
+| Profiler API | `GetMonoUsedSizeLong`, `GetMonoHeapSizeLong`, `GetTotalAllocatedMemoryLong`, `GetTotalReservedMemoryLong`, `GetAllocatedMemoryForGraphicsDriver` | all, equal to the recorders | all, equal to the recorders (`Mono` names report the CLR heap) |
+| .NET GC | `GC.GetTotalMemory(false)`, `GC.CollectionCount(n)` | yes. The three generation counts are always equal (Boehm) | yes, real generations (72 / 29 / 10 in an Editor that had reloaded 3 times) |
+| .NET GC | `GC.GetGCMemoryInfo()`: `HeapSizeBytes`, `FragmentedBytes`, `TotalCommittedBytes`, `PromotedBytes` | **missing** (the method is not in Mono's class library) | yes. `GenerationInfo` and `PauseDurations` throw `NotSupportedException` |
+| .NET GC | `GC.GetTotalAllocatedBytes`, `GC.GetTotalPauseDuration` | **missing** | yes |
+| Runtime | `AssemblyLoadContext.All` | **missing** | yes |
+| `ProfilerRecorder`, in a headless Release player (`player.scene`, 6.7 Mono) | the Memory category | 13 of them: GC, Total, Audio, Video, Profiler Used/Reserved, System Used, App Resident, App Committed. No Gfx, Object, Texture or Mesh counters | not run |
+| psutil (runner) | RSS of the Editor, of its tree | yes | yes |
+| psutil (runner) | private memory of the tree | **missing on macOS** (the OS refuses another process's unique set size; Windows and Linux give it, only Linux and Windows were not tried) | missing on macOS |
+
+The report prints the same thing per run: "Memory counters this process did not offer" lists what the workload asked for and the Editor did not have.
+
+### What the first runs showed
+
+`editor.reload_leak`, 30 reloads of a comment edit in a leaf assembly, 2 processes per Editor, the example project, macOS on an Apple-silicon laptop that was also running other work (a shape check, not a benchmark). Slope per reload (least squares, range of the two processes in brackets; after the forced collection):
+
+| Counter | 6000.7.0b2 (Mono) | 7000.0.0a7 (CoreCLR) |
+| --- | --- | --- |
+| managed used (`GC Used Memory`) | +0.09 MB (first 13.2 MB, last 16.6 MB; second half +0.01) | +5.15 MB [5.10, 5.20] (first 72 MB, last 221 MB) |
+| managed reserved (`GC Reserved Memory`) | +0.15 MB | +6.59 MB |
+| Unity native (`Total Used - GC Used`) | +10.7 MB [10.6, 10.8] (first 146 MB, last 464 MB) | +22.0 MB [22.0, 22.0] (first 225 MB, last 860 MB) |
+| `Total Reserved Memory` | +10.7 MB | +28.2 MB |
+| `App Resident Memory` | +1.1 MB [0.6, 1.5] (431 MB to 468 MB) | +122.5 MB [122.0, 123.0] (711 MB to 4,238 MB) |
+| `Object Count`, `Asset Count`, `Texture Count` | flat | +1 object in 30 reloads |
+| `Loaded Assemblies`, `AssemblyLoadContexts` | 196, n/a | 272, 3 (both flat) |
+
+A first identical run gave the same CoreCLR slopes to within 0.2 MB (managed, native) and 0.1 MB (resident); the Mono native slope was 9.0 MB then and 10.7 MB now, so read it as 9 to 11. `editor.play_leak` (10 cycles) gave the same picture: Mono native +8.9 MB, managed +0.07 MB, resident +0.8 MB per cycle; CoreCLR native +22.3 MB, managed +4.1 MB, resident +118 MB per cycle. Where the slopes are measured, then: on this alpha, the CoreCLR Editor grows with every reload and the Mono one grows only in Unity-native memory, at about half the rate or less; the number of assemblies and load contexts does not grow on either, so what accumulates is not visible as old code that stays loaded.
+
+The reading itself is not the cause. A control with the readings off (`editor.script_edit`, 30 rounds, `memory = false`, one process, CoreCLR) still peaked at 2.9 GB resident in the runner's once-a-second sample, from 0.6 GB at the start; with readings on, 3.5 GB; `force_gc = false` 3.5 GB (one process each, so the 0.6 GB difference is not established). Treat the CoreCLR figures as a property of an alpha Editor on one machine, and rerun them on the Editor you ship.
+
 ## Summary
 
 For each item (a sample name inside a workload) and variant:
