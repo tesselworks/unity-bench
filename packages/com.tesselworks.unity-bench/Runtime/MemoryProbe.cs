@@ -153,7 +153,8 @@ namespace UnityBench.Player
             var pause = Call("GetTotalPauseDuration", Type.EmptyTypes);
             if (pause is TimeSpan span) values.Add(new MemoryValue { Name = ".NET GC Pause Total", Unit = "ms", Value = span.TotalMilliseconds });
             else missing?.Add(".NET GC Pause Total");
-            // Code that stays loaded after a reload: assemblies in the process, and (CoreCLR) the AssemblyLoadContexts that hold them. A count that grows per reload means old code was not unloaded.
+            // Assemblies in the process and (CoreCLR) the AssemblyLoadContexts listed. Neither detects an unload leak on CoreCLR: both lists drop a context as soon as
+            // Unload() is called, even if it is never collected (tesselworks/unity-bench#18). The leak workloads count the survivors instead (BatchMemory.cs).
             values.Add(new MemoryValue { Name = "Loaded Assemblies", Unit = "count", Value = AppDomain.CurrentDomain.GetAssemblies().Length });
             var contexts = CountContexts();
             if (contexts >= 0) values.Add(new MemoryValue { Name = "AssemblyLoadContexts", Unit = "count", Value = contexts });

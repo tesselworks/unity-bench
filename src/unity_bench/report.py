@@ -12,7 +12,7 @@ MEMORY_GROUPS = (('managed heap', ('GC Used Memory', 'GC Reserved Memory', '.NET
                  ('Unity native', ('Unity Native (Total Used - GC Used)', 'Total Reserved Memory')),
                  ('graphics', ('Gfx Used Memory', 'Gfx Driver (API)')),
                  ('process', ('App Resident Memory', 'Process RSS (runner)', 'Process tree RSS (runner)', 'Process tree Private (runner)')),
-                 ('loaded code', ('Loaded Assemblies', 'AssemblyLoadContexts')),
+                 ('loaded code', ('Unloaded contexts still alive', 'Unloaded contexts', 'Loaded Assemblies', 'AssemblyLoadContexts')),
                  ('objects', ('Object Count',)))
 ROUNDS_KINDS = ('editor.script_edit', 'editor.play', 'editor.adapter', 'editor.reload_leak', 'editor.play_leak', 'player.build_time', 'player.adapter')   # kinds where `rounds` means something
 
@@ -450,15 +450,49 @@ def render_leak(w):
             unit = r['unit']
             body.append([label, counter, v, amount(c['first'], unit), amount(c['last'], unit), signed(c['slope'], unit) + ' [' + signed(c['slope_range'][0], unit) + ' to ' + signed(c['slope_range'][1], unit) + ']',
                          signed(c['tail_slope'], unit) if c['tail_slope'] is not None else '-', signed(c['residual'][0], unit) + ' to ' + signed(c['residual'][1], unit), f"{c['points']} x {c['processes']}"])
-    lines = ['', f"Memory after each reload or Play Mode cycle of `{w['workload']}` (a collection is forced before every reading when `force_gc` is on; see methodology). First and last are "
+    lines = render_leak_headline(w)
+    lines += ['', f"Memory after each reload or Play Mode cycle of `{w['workload']}` (a collection is forced before every reading when `force_gc` is on; see methodology). First and last are "
                  "the readings after the first and the last cycle; slope is the least-squares fit per cycle, in brackets the range over processes; second half fits the later half of the series; "
                  "residual is the range of (reading - fitted line); points x processes:", '']
     lines += table(['Group', 'Counter', 'Variant', 'First', 'Last', 'Slope per cycle (MB for bytes)', 'Slope, second half', 'Residual range', 'Points x processes'], body)
     lines += ['', f"{len(w['leak'])} counters were read per cycle; all of them, with their slopes, are in `summary.json` (`leak`)."]
+    lines += render_alc_leaks(w)
     if w.get('snapshots'):
         lines += ['', 'Memory Profiler snapshots taken at the end of each process (open them with the Memory Profiler package; they are large and not part of the results):', '']
         lines += [f"- `{s['variant']}` process #{s['index']}: " + (f"`snapshots/{Path(s['result']).name}`" if s['result'].endswith('.snap') else s['result']) for s in w['snapshots']]
     return lines
+
+
+def render_leak_headline(w):
+    """The leak workload's result, per variant: resident memory per cycle and the unloaded code contexts still alive after the last cycle."""
+    head = w.get('leak_headline') or {}
+    if not head:
+        return []
+    body = []
+    for v, h in head.items():
+        slope = (signed(h['resident_slope'], 'bytes') + ' [' + signed(h['resident_slope_range'][0], 'bytes') + ' to ' + signed(h['resident_slope_range'][1], 'bytes') + ']'
+                 if h['resident_slope'] is not None else 'not offered')
+        levels = f"{amount(h['resident_first'], 'bytes')} to {amount(h['resident_last'], 'bytes')}" if h['resident_first'] is not None else '-'
+        alive = f"{h['survivors_last']:g} of {h['unloaded_last']:g}" if h['survivors_last'] is not None and h['unloaded_last'] is not None else 'not counted (no collectible contexts: Mono)'
+        body.append([v, slope, levels, alive, f"{h['points']} x {h['processes']}"])
+    lines = ['', f"Result of `{w['workload']}`: the process's resident memory per cycle (least-squares slope, range over processes in brackets) and how many unloaded code contexts "
+                 "were still alive after the last cycle. A healthy CoreCLR Editor keeps 0 (or 1 while the last unload completes); one that leaks every reload keeps all of them. "
+                 "`Loaded Assemblies` and `AssemblyLoadContexts` do not show this: a context drops out of both lists when it is unloaded, whether or not it is ever collected.", '']
+    return lines + table(['Variant', 'App Resident Memory per cycle', 'First to last (median)', 'Unloaded contexts still alive (last cycle, median)', 'Points x processes'], body)
+
+
+def render_alc_leaks(w):
+    """What the Editor's own leak detection wrote, when the workload asked for it."""
+    found = w.get('alc_leaks') or {}
+    if not found:
+        return []
+    body = []
+    for v, a in found.items():
+        body.append([v, a['processes'], a['files'], a['leaks'] if not a['unreadable'] else f"{a['leaks']} ({a['unreadable']} file(s) unreadable)",
+                     ' <- '.join(a['first']['path']) + (f" (root: {a['first']['root']})" if a['first'].get('root') else '') if a['first'] else '-'])
+    return ['', "The Editor's unload-leak detection (`alc_leak_detection = true`: `-enable-alc-leak-detection 1`; it walks the heap after each unload, so this "
+                "workload's timings and memory are not comparable with a run without it). Its reports are in the run directory under `alc-leaks/`:", '',
+            *table(['Variant', 'Processes', 'Report files', 'Leaked objects', 'First leak, path to its root'], body)]
 
 
 def scene_notes(w):

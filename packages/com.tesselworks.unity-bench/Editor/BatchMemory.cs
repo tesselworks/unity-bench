@@ -1,10 +1,13 @@
 // Memory readings of the Editor workloads (docs/methodology.md#memory-counters): start and end of the measured part, the peak over the run, one
 // reading per reload (editor.reload_leak) or Play Mode cycle (editor.play_leak), and an optional Memory Profiler snapshot at the end.
 // Readings are samples with a unit (bytes, count, ms): `mem/<start|end|peak>/<name>` once per process, `leak/<name>` once per reload or cycle (round = its index).
+// The leak kinds also count unloaded code contexts that are still alive (CoreCLR; see CountSurvivors).
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using UnityEditor;
 using MemoryProbe = UnityBench.Player.MemoryProbe;
 using MemoryValue = UnityBench.Player.MemoryValue;
@@ -53,6 +56,7 @@ namespace UnityBench.Editor
         static void MemoryStart()
         {
             if (!Measures) return;
+            if (IsLeak(s.req.kind)) TrackGeneration();
             foreach (var v in Read(true)) AddMemorySample("mem/start/" + v.Name, v, 0);
             s.lastPoll = Now;
         }
@@ -84,6 +88,9 @@ namespace UnityBench.Editor
                 s.notes.Add(new Pair { k = "memory.offered", v = string.Join(", ", MemoryProbe.Offered()) });
                 s.notes.Add(new Pair { k = "memory.missing", v = string.Join(", ", s.memMissing) });
                 if (IsLeak(s.req.kind)) s.notes.Add(new Pair { k = "memory.forced_gc", v = s.req.forceGc ? "GC.Collect, WaitForPendingFinalizers, GC.Collect, EditorUtility.UnloadUnusedAssetsImmediate" : "none" });
+                if (IsLeak(s.req.kind)) s.notes.Add(new Pair { k = "memory.unloaded_contexts", v = Collectible
+                    ? "one weak GCHandle per generation of UnityBench.Editor.BatchEntry; counted after up to " + SurvivorCollections + " x (GC.Collect, WaitForPendingFinalizers)"
+                    : "not counted: this Editor's script code is not in a collectible AssemblyLoadContext (Mono)" });
             }
             catch (Exception e) { s.notes.Add(new Pair { k = "memory.error", v = e.GetType().Name + ": " + e.Message }); }
         }
@@ -98,7 +105,91 @@ namespace UnityBench.Editor
                 EditorUtility.UnloadUnusedAssetsImmediate();
             }
             foreach (var v in Read(true)) AddMemorySample("leak/" + v.Name, v, s.leakIndex);
+            CountSurvivors(s.leakIndex);
             s.leakIndex++;
+        }
+
+        // ---- unloaded code that stays alive (CoreCLR) ------------------------------------------------------------------
+        //
+        // AppDomain.GetAssemblies() and AssemblyLoadContext.All stop listing a context as soon as Unload() is called, even when it is never collected, so
+        // `Loaded Assemblies` and `AssemblyLoadContexts` stay flat while every reload leaks the previous context (tesselworks/unity-bench#18). Instead this keeps
+        // one weak GCHandle per generation of this package's code (to the Type BatchEntry, which lives in the same collectible context as the project's
+        // scripts) across reloads; the handle table survives a code reload, the handle does not keep its target alive. After the forced collections, a handle
+        // to an earlier generation whose target is still alive is a context that was unloaded but not collected. A healthy Editor reads 0 (sometimes 1 while
+        // the last unload completes); a leaking one reads the number of reloads so far. Mono reloads the whole domain, has no collectible contexts, and reports
+        // the counter as not available.
+
+        const string SurvivorName = "Unloaded contexts still alive", TrackedName = "Unloaded contexts";
+        const int SurvivorCollections = 5;
+        static readonly PropertyInfo IsCollectibleProperty = typeof(Assembly).GetProperty("IsCollectible");   // not in the API surface the Editor compiles against
+
+        static bool Collectible
+        {
+            get
+            {
+                try { return Type.GetType("Mono.Runtime") == null && IsCollectibleProperty != null && (bool)IsCollectibleProperty.GetValue(typeof(BatchEntry).Assembly); }
+                catch (Exception) { return false; }
+            }
+        }
+
+        // Called on every load of the package's code while a leak workload runs (Recover) and at its start: a new generation gets a handle.
+        static void TrackGeneration()
+        {
+            if (s == null || !Collectible || Known(typeof(BatchEntry))) return;
+            s.generations.Add(GCHandle.ToIntPtr(GCHandle.Alloc(typeof(BatchEntry), GCHandleType.Weak)).ToInt64());
+        }
+
+        static void CountSurvivors(int round)
+        {
+            if (!Collectible) { if (!s.memMissing.Contains(SurvivorName)) s.memMissing.Add(SurvivorName); return; }
+            TrackGeneration();
+            int alive = 0, old = 0;
+            // An unload completes over more than one collection (the loader allocator is finalized first); stop as soon as nothing old is alive.
+            for (var i = 0; i <= SurvivorCollections; i++)
+            {
+                Survivors(out alive, out old);
+                if (alive == 0 || i == SurvivorCollections) break;
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+            AddMemorySample("leak/" + SurvivorName, new MemoryValue { Name = SurvivorName, Unit = "count", Value = alive }, round);
+            AddMemorySample("leak/" + TrackedName, new MemoryValue { Name = TrackedName, Unit = "count", Value = old }, round);
+        }
+
+        // Kept out of line so that no target stays on the caller's stack (and alive) through its collections.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static void Survivors(out int alive, out int old)
+        {
+            alive = old = 0;
+            foreach (var h in s.generations)
+            {
+                var target = Target(h);
+                if (ReferenceEquals(target, typeof(BatchEntry))) continue;
+                old++;
+                if (target != null) alive++;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static bool Known(Type current)
+        {
+            foreach (var h in s.generations) if (ReferenceEquals(Target(h), current)) return true;
+            return false;
+        }
+
+        static object Target(long handle)
+        {
+            try { return GCHandle.FromIntPtr(new IntPtr(handle)).Target; }
+            catch (Exception) { return null; }
+        }
+
+        static void FreeGenerations()
+        {
+            foreach (var h in s.generations)
+            {
+                try { GCHandle.FromIntPtr(new IntPtr(h)).Free(); } catch (Exception) { }
+            }
+            s.generations.Clear();
         }
 
         // ---- Memory Profiler snapshot ----------------------------------------------------------------------------------

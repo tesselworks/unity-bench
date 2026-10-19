@@ -8,6 +8,16 @@
 - The commit is still recorded, in the provenance and the report. When a run reuses a copy that was made at an older commit with the same content, the provenance names this run's `commit` and adds `prepared_from_commit`; the report's "Project commit" cell says so. `cache list` shows the commit the entry was made at.
 - The cache format is 2: entries written by 0.6.0 and earlier are not read (`entry was written by another cache format`) and are removed by `cache prune`; the first run prepares each copy once more.
 
+### New
+
+- **Unloaded code contexts that stay alive** (tesselworks/unity-bench#18). On a CoreCLR Editor, `Loaded Assemblies` and `AssemblyLoadContexts` cannot show an unload leak: `AppDomain.GetAssemblies()` and `AssemblyLoadContext.All` drop a context as soon as `Unload()` is called, even when it is never collected, so both stayed flat on 7000.0.0a7 while every reload leaked the previous context (about 120 MB). The leak workloads now keep a weak `GCHandle` to each generation of the package's code across reloads and report, after every reading and up to five more forced collections, `leak/Unloaded contexts still alive` and `leak/Unloaded contexts` (counts). A healthy Editor keeps 0; a leaking one keeps one per reload. A Mono Editor lists the counter as not available.
+- **The result of a leak workload comes first**: a table per variant with the `App Resident Memory` slope per cycle (least squares, range over processes) and the unloaded contexts still alive after the last cycle; `leak_headline` in `summary.json`.
+- **`alc_leak_detection = true`** on `editor.reload_leak` / `editor.play_leak` runs the Editor with `-enable-alc-leak-detection 1`, moves the `Logs/ALCLeaks-*.json` reports it writes into `<run dir>/alc-leaks/<process>/` and reports the number of files and leaked objects and the first path to a root. `alc_leaks` on the process row and in `summary.json`.
+
+### Documentation
+
+- [methodology](docs/methodology.md#memory-counters) no longer says that a rising assembly count detects an unload leak, and corrects the v0.6 reading of the first runs ("both flat" did not mean that no old code stayed loaded). It says why `App Resident Memory`, not RSS, is the process metric for a leak on macOS (in a leaking run, RSS 1.4 GB against a physical footprint of 13.6 GB), and how the survivor count works ([Unloaded contexts](docs/methodology.md#unloaded-contexts)).
+
 ## 0.6.0
 
 Editor memory: a breakdown on every Editor process, and workloads that ask whether an Editor keeps growing when the same code is reloaded again and again (tesselworks/unity-bench#15). Philosophy unchanged: annotate, do not refuse; a counter an Editor does not offer is listed, not an error.

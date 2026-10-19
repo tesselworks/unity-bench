@@ -19,8 +19,8 @@ KINDS = {
     'editor.warm_open': {'description': 'Open the project in batchmode with its Library, quit.'},
     'editor.script_edit': {'description': 'Edit a script, time compile and compile+reload+idle.', 'keys': {'targets'}},
     'editor.play': {'description': 'Enter and exit Play Mode.', 'keys': {'domain_reload', 'scene'}},
-    'editor.reload_leak': {'description': 'Edit a script and reload N times in one Editor, read memory after each reload.', 'keys': {'targets', 'force_gc', 'memory_snapshot'}},
-    'editor.play_leak': {'description': 'Enter and exit Play Mode N times in one Editor, read memory after each cycle.', 'keys': {'domain_reload', 'scene', 'force_gc', 'memory_snapshot'}},
+    'editor.reload_leak': {'description': 'Edit a script and reload N times in one Editor, read memory after each reload.', 'keys': {'targets', 'force_gc', 'memory_snapshot', 'alc_leak_detection'}},
+    'editor.play_leak': {'description': 'Enter and exit Play Mode N times in one Editor, read memory after each cycle.', 'keys': {'domain_reload', 'scene', 'force_gc', 'memory_snapshot', 'alc_leak_detection'}},
     'editor.adapter': {'description': 'Run a project C# adapter inside the Editor.', 'keys': {'method', 'args'}},
     'player.build_time': {'description': 'BuildPipeline.BuildPlayer wall time.', 'keys': BUILD_KEYS | {'mode'}},
     'player.startup': {'description': 'Launch a built player until its first frame.', 'keys': BUILD_KEYS | {'build', 'headless', 'window', 'player_args', 'startup_timeout_seconds'}},
@@ -197,7 +197,7 @@ def check_kind(w):
     if kind in LEAK_KINDS:
         require(w['memory'], f'workload {wid}: {kind} reads memory after every cycle; memory = false leaves nothing to report')
         require(w['rounds'] >= 3, f'workload {wid}: rounds must be at least 3 to fit a slope')
-        for key in ('force_gc', 'memory_snapshot'):
+        for key in ('force_gc', 'memory_snapshot', 'alc_leak_detection'):
             w.setdefault(key, key == 'force_gc')
             require(isinstance(w[key], bool), f'workload {wid}: {key} must be a boolean')
     if kind in ('editor.script_edit', 'editor.reload_leak'):

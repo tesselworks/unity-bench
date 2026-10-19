@@ -261,6 +261,16 @@ Adapters do not write these; consumers that read `results.jsonl` or `summary.jso
 | `campaign.json` | `provenance.variants.<id>.prepared` | `{status: "built" or "reused", key, editor, seconds, method, built_seconds, prime_ms, rebuilt_because, note, settings_changed_by_priming, cache_dir}` |
 | `summary.json` | `states` | `{prepared: {variant: the record above}, workloads: [{workload, variant, requested, actual, snapshots, methods, restore_ms_median, verified, isolated, imports, ...}]}` |
 
+### Added in v0.7 (additive)
+
+| Where | Field | Meaning |
+| --- | --- | --- |
+| sample names | `leak/Unloaded contexts still alive`, `leak/Unloaded contexts` | leak workloads on a CoreCLR Editor (unit `count`, one per reading): earlier generations of the package's code still alive after the forced collections, and how many earlier generations there are. A Mono Editor lists `Unloaded contexts still alive` in `memory.missing` |
+| process notes | `memory.unloaded_contexts` | how the count was taken, or why it was not |
+| request file | none | `alc_leak_detection` is applied by the runner (an Editor argument), not by the package |
+| `process` row | `alc_leaks` | with `alc_leak_detection = true`: `{files, leaks, unreadable, first: {file, path, root} or null, dir}` for the `ALCLeaks-*.json` reports this process wrote; `dir` is relative to the run directory |
+| `summary.json` workload | `leak_headline`, `alc_leaks` | leak workloads: per variant `{resident_slope, resident_slope_range, resident_first, resident_last, survivors_last, survivors_slope, unloaded_last, points, processes}` (bytes per cycle; `null` where a counter was not offered); per variant `{processes, files, leaks, unreadable, first, dirs}` |
+
 ### Added in v0.6 (additive)
 
 | Where | Field | Meaning |

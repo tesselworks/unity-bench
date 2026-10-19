@@ -88,7 +88,8 @@ class Campaign:
         self.write({'type': 'process', **base, 'status': status, 'error': outcome['error'], 'exit_code': outcome['exit_code'], 'state': state,
                     'wall_ms': outcome['wall_ms'], 'environment': outcome['environment'], 'notes': outcome['notes'], 'build': outcome['build'],
                     'headline': outcome['headline'], 'cleanup': outcome['cleanup'], 'host': sampler.summary(), 'restored_files': restored,
-                    'started_at': datetime.datetime.fromtimestamp(started).isoformat(timespec='seconds'), 'log': f'logs/{stem}.log' if log.exists() else None})
+                    'started_at': datetime.datetime.fromtimestamp(started).isoformat(timespec='seconds'), 'log': f'logs/{stem}.log' if log.exists() else None,
+                    **({'alc_leaks': outcome['alc_leaks']} if outcome.get('alc_leaks') else {})})
         if status == 'ok':
             for s in outcome['samples']:
                 self.write({'type': 'sample', **base, 'name': s['name'], 'phase': s['phase'], 'ms': s['ms'], 'round': s.get('round', 0),
@@ -197,9 +198,13 @@ class Campaign:
     def batch(self, w, v, project, row, stem, sampler, outcome, output=None):
         req, path = self.request(w, v, row, stem, output)
         log = self.out / 'logs' / f'{stem}.log'
-        run = self.launch(self.editor_command(v, project, log, ['-executeMethod', BATCH_METHOD, '-unityBenchRequest', str(path)]),
+        detect = bool(w.get('alc_leak_detection'))
+        before = set(alc_leak_files(project)) if detect else set()
+        run = self.launch(self.editor_command(v, project, log, ['-executeMethod', BATCH_METHOD, '-unityBenchRequest', str(path), *(ALC_LEAK_ARGS if detect else [])]),
                           project, w['timeout_seconds'], sampler)
         self.finish_run(run, outcome)
+        if detect:   # also after a failure: the reports written so far say why
+            outcome['alc_leaks'] = collect_alc_leaks(project, before, self.out, stem)
         if outcome['error']:
             # A failed process often wrote a result with the reason.
             try:
@@ -400,6 +405,60 @@ class Campaign:
             {'name': 'launch_to_probe', 'ms': (signal.stat().st_mtime - before) * 1000, 'phase': phase, 'info': {'frame': reported.get('frame')}},
             {'name': 'engine_to_probe', 'ms': reported['realtimeSinceStartupMs'], 'phase': phase},
             {'name': 'launch_to_exit', 'ms': run.wall_ms, 'phase': phase}]
+
+
+ALC_LEAK_ARGS = ['-enable-alc-leak-detection', '1']   # the CoreCLR Editor's own check of unloaded contexts: Logs/ALCLeaks-*.json, one file per detection
+
+
+def alc_leak_files(project):
+    return sorted((Path(project) / 'Logs').glob('ALCLeaks-*.json'))
+
+
+def collect_alc_leaks(project, before, out, stem):
+    """Move the leak reports one process wrote from the project copy into `<run dir>/alc-leaks/<stem>/` and count them.
+
+    Files that were there before the process (a killed earlier run) are left where they are. A report is {"ALCLeaks": {"Leaks": [{"PathToRoot": [...], "Root": {...}}]}};
+    the first path is kept as type names from the leaked context's LoaderAllocator to the root, generic arguments shortened.
+    """
+    files = [f for f in alc_leak_files(project) if f not in before]
+    record = {'files': len(files), 'leaks': 0, 'unreadable': 0, 'first': None, 'dir': None}
+    if not files:
+        return record
+    target = Path(out) / 'alc-leaks' / stem
+    target.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        try:
+            leaks = json.loads(f.read_text(encoding='utf-8'))['ALCLeaks']['Leaks']
+            record['leaks'] += len(leaks)
+            if leaks and record['first'] is None:
+                first = leaks[0]
+                names = [short_type(x.get('TypeName', '?')) + (f" \"{x['Name']}\"" if x.get('Name') else '') for x in first.get('PathToRoot') or []]
+                root = first.get('Root') or {}
+                record['first'] = {'file': f.name, 'path': names, 'root': ' '.join(str(root[k]) for k in ('Kind', 'FieldName') if root.get(k))}
+        except (OSError, ValueError, KeyError, TypeError):
+            record['unreadable'] += 1
+        shutil.move(str(f), str(target / f.name))
+    record['dir'] = f'alc-leaks/{stem}'
+    return record
+
+
+def short_type(name):
+    """`System.Collections.Generic.Dictionary<System.Type, X>` -> `Dictionary<...>`: the leaf name, generic arguments elided."""
+    flat, depth = [], 0
+    for ch in name:
+        if ch == '<':
+            depth += 1
+            if depth == 1:
+                flat.append('<...')
+        elif ch == '>':
+            depth -= 1
+            if depth == 0:
+                flat.append('>')
+        elif depth == 0:
+            flat.append(ch)
+    text = ''.join(flat)
+    head, sep, rest = text.partition('<')
+    return head.rsplit('.', 1)[-1] + sep + rest
 
 
 def new_outcome():

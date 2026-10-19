@@ -50,6 +50,14 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(config.ConfigError, message):
                 config.validate(raw(workload), '/base')
 
+    def test_alc_leak_detection_is_an_opt_in_of_the_leak_workloads(self):
+        w = config.validate(raw({'id': 'r', 'kind': 'editor.reload_leak', 'targets': [LEAF]}, {'id': 'p', 'kind': 'editor.play_leak', 'alc_leak_detection': True}), '/base')['workloads']
+        self.assertEqual([x['alc_leak_detection'] for x in w], [False, True])
+        with self.assertRaisesRegex(config.ConfigError, 'alc_leak_detection must be a boolean'):
+            config.validate(raw({'id': 'p', 'kind': 'editor.play_leak', 'alc_leak_detection': 1}), '/base')
+        with self.assertRaisesRegex(config.ConfigError, 'unknown key'):
+            config.validate(raw({'id': 'e', 'kind': 'editor.script_edit', 'targets': [LEAF], 'alc_leak_detection': True}), '/base')
+
     def test_memory_key_is_for_the_kinds_that_read_memory(self):
         self.assertFalse(config.validate(raw({'id': 'e', 'kind': 'editor.script_edit', 'targets': [LEAF], 'memory': False}), '/base')['workloads'][0]['memory'])
         self.assertTrue(config.validate(raw({'id': 'e', 'kind': 'editor.play'}), '/base')['workloads'][0]['memory'])
@@ -249,7 +257,7 @@ class FakeEditorTests(unittest.TestCase):
 
     def test_leak_workloads_report_the_slope_per_variant_and_list_what_an_editor_did_not_offer(self):
         out, rows = self.run_campaign(
-            [{'id': 'mono', 'editor': editor('--leak-mb', '0.5', '--mem-missing', '.NET Heap Size,.NET Committed')}, {'id': 'core', 'editor': editor('--leak-mb', '0')}],
+            [{'id': 'mono', 'editor': editor('--leak-mb', '0.5', '--mem-missing', '.NET Heap Size,.NET Committed')}, {'id': 'core', 'editor': editor('--leak-mb', '0', '--survivors', '0')}],
             [{'id': 'reload', 'kind': 'editor.reload_leak', 'rounds': 8, 'targets': [LEAF]}, {'id': 'play', 'kind': 'editor.play_leak', 'rounds': 5}, {'id': 'edit', 'kind': 'editor.script_edit', 'targets': [LEAF]}])
         self.assertEqual([r['error'] for r in rows if r['type'] == 'process' and r['status'] != 'ok'], [])
         request = json.loads(next((out / 'requests').glob('*reload-mono.json')).read_text())
@@ -263,7 +271,7 @@ class FakeEditorTests(unittest.TestCase):
         self.assertAlmostEqual(series['GC Used Memory']['cells']['core']['slope'], 0.0)
         self.assertEqual(series['GC Used Memory']['cells']['mono']['points'], 8)
         self.assertEqual({r['name']: r for r in by['play']['leak']}['GC Used Memory']['cells']['mono']['points'], 5)
-        self.assertEqual(by['reload']['memory_counters']['mono']['missing'], ['.NET Committed', '.NET Heap Size'])
+        self.assertEqual(by['reload']['memory_counters']['mono']['missing'], ['.NET Committed', '.NET Heap Size', 'Unloaded contexts still alive'])
         self.assertEqual(by['reload']['memory_counters']['core']['missing'], [])
         # the ordinary workload also has the breakdown, as annotations
         self.assertIn('mem/end/GC Used Memory', [i['name'] for i in by['edit']['memory']])
@@ -273,6 +281,67 @@ class FakeEditorTests(unittest.TestCase):
                      '| managed heap | GC Used Memory | mono | 12.5 MB | 16.0 MB | +0.500 MB [+0.500 MB to +0.500 MB] |', '| mono | .NET Committed, .NET Heap Size |'):
             self.assertTrue(text in md, f'not in summary.md: {text}')   # not assertIn: a failure would print the whole report
         self.assertEqual(sorted(w['workload'] for w in s['workloads'] if w['reload']), ['edit', 'play', 'reload'])   # reload blocks are attributed for the leak kinds too
+
+    def test_unloaded_contexts_that_stay_alive_are_the_result_of_a_leak_workload(self):
+        # tesselworks/unity-bench#18: a7 keeps every unloaded context (and grows), a9 collects them, Mono has no collectible contexts to count.
+        out, rows = self.run_campaign([{'id': 'mono', 'editor': editor('--leak-mb', '0.3')}, {'id': 'a7', 'editor': editor('--leak-mb', '40', '--survivors', '1')},
+                                       {'id': 'a9', 'editor': editor('--leak-mb', '0', '--survivors', '0')}],
+                                      [{'id': 'reload', 'kind': 'editor.reload_leak', 'rounds': 6, 'repeats': 2, 'targets': [LEAF]}])
+        self.assertEqual([r['error'] for r in rows if r['type'] == 'process' and r['status'] != 'ok'], [])
+        w = json.loads((out / 'summary.json').read_text())['workloads'][0]
+        head = w['leak_headline']
+        self.assertAlmostEqual(head['a7']['resident_slope'] / MB, 120.0)   # App Resident grows 3x --leak-mb in the fake
+        self.assertEqual((head['a7']['survivors_last'], head['a7']['unloaded_last'], head['a7']['survivors_slope']), (6.0, 6.0, 1.0))
+        self.assertEqual((head['a9']['survivors_last'], head['a9']['unloaded_last'], head['a9']['survivors_slope']), (0.0, 6.0, 0.0))
+        self.assertIsNone(head['mono']['survivors_last'])
+        self.assertAlmostEqual(head['mono']['resident_slope'] / MB, 0.9)
+        self.assertEqual((head['a7']['points'], head['a7']['processes']), (6, 2))
+        self.assertEqual(w['alc_leaks'], {})   # not asked for
+        md = (out / 'summary.md').read_text()
+        for text in ('Result of `reload`: the process\'s resident memory per cycle', '| a7 | +120.000 MB [+120.000 MB to +120.000 MB] | 570.0 MB to 1.14 GB | 6 of 6 | 6 x 2 |',
+                     '| a9 | +0.000 MB [+0.000 MB to +0.000 MB] | 450.0 MB to 450.0 MB | 0 of 6 | 6 x 2 |', '| mono | +0.900 MB', 'not counted (no collectible contexts: Mono)',
+                     '| loaded code | Unloaded contexts still alive | a7 | 1 | 6 | +1.00 [+1.00 to +1.00] |', '| loaded code | Unloaded contexts still alive | a9 | 0 | 0 | +0.00 [+0.00 to +0.00] |'):
+            self.assertTrue(text in md, f'not in summary.md: {text}')
+        self.assertLess(md.index('Result of `reload`'), md.index('Memory after each reload or Play Mode cycle of `reload`'))
+
+    def test_alc_leak_reports_are_moved_into_the_run_and_counted(self):
+        out, rows = self.run_campaign([{'id': 'a7', 'editor': editor('--survivors', '1', '--alc-leaks', '1')}, {'id': 'a9', 'editor': editor('--survivors', '0', '--alc-leaks', '0')}],
+                                      [{'id': 'reload', 'kind': 'editor.reload_leak', 'rounds': 4, 'repeats': 1, 'targets': [LEAF], 'alc_leak_detection': True},
+                                       {'id': 'plain', 'kind': 'editor.reload_leak', 'rounds': 3, 'repeats': 1, 'targets': [LEAF]}])
+        processes = {(r['workload'], r['variant']): r for r in rows if r['type'] == 'process'}
+        self.assertEqual({k: p['status'] for k, p in processes.items()}, dict.fromkeys(processes, 'ok'))
+        a7 = processes[('reload', 'a7')]['alc_leaks']
+        self.assertEqual((a7['files'], a7['leaks'], a7['unreadable']), (4, 4, 0))
+        self.assertEqual(a7['first']['path'], ['LoaderAllocator "User #1"', 'Dictionary<...>', 'ScopeTransitionHelper'])
+        self.assertEqual(a7['first']['root'], 'StaticField Owner::_instance')
+        self.assertEqual(len(list((out / a7['dir']).glob('ALCLeaks-*.json'))), 4)
+        self.assertEqual(processes[('reload', 'a9')]['alc_leaks']['leaks'], 0)
+        self.assertNotIn('alc_leaks', processes[('plain', 'a7')])   # not asked for: no argument, nothing collected
+        logs = {p.name: p.read_text() for p in (out / 'logs').glob('*.log')}
+        self.assertTrue(all(('-enable-alc-leak-detection 1' in text) == ('-reload-' in name) for name, text in logs.items() if '-plain-' in name or '-reload-' in name))
+        w = {x['workload']: x for x in json.loads((out / 'summary.json').read_text())['workloads']}
+        self.assertEqual((w['reload']['alc_leaks']['a7']['files'], w['reload']['alc_leaks']['a7']['leaks'], w['reload']['alc_leaks']['a9']['leaks']), (4, 4, 0))
+        md = (out / 'summary.md').read_text()
+        self.assertTrue('| a7 | 1 | 4 | 4 | LoaderAllocator "User #1" <- Dictionary<...> <- ScopeTransitionHelper (root: StaticField Owner::_instance) |' in md)
+        self.assertTrue('| a9 | 1 | 4 | 0 | - |' in md)
+
+    def test_alc_leak_files_from_before_the_process_stay_where_they_are(self):
+        project = self.tmp / 'copy'
+        (project / 'Logs').mkdir(parents=True)
+        (project / 'Logs/ALCLeaks-1-old.json').write_text('{}')
+        before = set(runner.alc_leak_files(project))
+        (project / 'Logs/ALCLeaks-2-new.json').write_text('{"ALCLeaks": {"Leaks": []}}')
+        (project / 'Logs/ALCLeaks-2-bad.json').write_text('not json')
+        record = runner.collect_alc_leaks(project, before, self.tmp / 'run', '0001-x-a')
+        self.assertEqual((record['files'], record['leaks'], record['unreadable'], record['first'], record['dir']), (2, 0, 1, None, 'alc-leaks/0001-x-a'))
+        self.assertEqual(sorted(p.name for p in (project / 'Logs').iterdir()), ['ALCLeaks-1-old.json'])
+        self.assertEqual(sorted(p.name for p in (self.tmp / 'run/alc-leaks/0001-x-a').iterdir()), ['ALCLeaks-2-bad.json', 'ALCLeaks-2-new.json'])
+        self.assertEqual(runner.collect_alc_leaks(project, before, self.tmp / 'run', '0002-x-a'), {'files': 0, 'leaks': 0, 'unreadable': 0, 'first': None, 'dir': None})
+
+    def test_type_names_of_a_leak_path_are_shortened(self):
+        self.assertEqual(runner.short_type('System.Collections.Generic.Dictionary+Entry<System.Type, System.Collections.Generic.List<A.B>>[]'), 'Dictionary+Entry<...>[]')
+        self.assertEqual(runner.short_type('Unity.Scripting.LifecycleManagement.LifecycleController'), 'LifecycleController')
+        self.assertEqual(runner.short_type('System.Action'), 'Action')
 
     def test_memory_false_and_an_editor_without_the_package_code_leave_no_readings(self):
         out, rows = self.run_campaign([{'id': 'a', 'editor': editor()}, {'id': 'b', 'editor': editor('--no-memory')}],
