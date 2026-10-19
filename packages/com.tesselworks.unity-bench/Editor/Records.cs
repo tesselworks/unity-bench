@@ -78,6 +78,7 @@ namespace UnityBench.Editor
         public List<string> memMissing = new List<string>();
         public long lastPoll;
         public int leakIndex;                              // reloads (or Play Mode cycles) read so far
+        public List<long> generations = new List<long>();   // weak GCHandles (as IntPtr values) to BatchEntry, one per generation of the package's code seen (CoreCLR)
         public bool snapshotDone;
     }
 }

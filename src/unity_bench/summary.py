@@ -9,7 +9,7 @@ import json
 import re
 import statistics
 
-from .config import SCENE_KINDS
+from .config import LEAK_KINDS, SCENE_KINDS
 from .identity import identity, pair_identity
 from .stats import RESOLUTION_MS, bootstrap_ratio, compare, describe, geomean, linear_fit, process_medians
 
@@ -106,6 +106,9 @@ def summarise(rows, exclude_first_use=True, include_differing=False, baseline=No
             entry['markers'] = markers(mine_processes, entry['variants'])
         entry['reload'] = reload_table(workload, reloads, entry['variants'], exclude_first_use)
         entry['leak'] = leak_table(mine, entry['variants'])
+        if entry['kind'] in LEAK_KINDS:
+            entry['leak_headline'] = leak_headline(entry['leak'], entry['variants'])
+            entry['alc_leaks'] = alc_leaks(mine_processes, entry['variants'])
         entry['memory_counters'] = memory_counters(mine_processes, entry['variants'])
         entry['snapshots'] = [{'variant': p['variant'], 'index': p['index'], 'result': (p.get('notes') or {})['memory.snapshot']} for p in mine_processes
                               if p['status'] == 'ok' and (p.get('notes') or {}).get('memory.snapshot')]   # a .snap path in the run directory, or why none was taken
@@ -167,6 +170,41 @@ def leak_table(samples, variants):
                             'residual': [min(f['residual'][0] for f in fits), max(f['residual'][1] for f in fits)]}
         rows.append({'name': name, 'unit': unit, 'cells': cells})
     return rows
+
+
+RESIDENT, SURVIVORS, UNLOADED = 'App Resident Memory', 'Unloaded contexts still alive', 'Unloaded contexts'   # the leak workloads' headline counters (MemoryProbe, BatchMemory.cs)
+
+
+def leak_headline(leak, variants):
+    """The numbers a leak workload is read by, per variant: the slope of the process's resident memory per cycle, and how many unloaded code contexts were still alive after the last cycle.
+
+    Resident memory (phys_footprint on macOS, the working set on Windows, as Unity reports it) is where an unload leak shows: the managed heap is a small part of it,
+    and the assembly counts do not see it at all (tesselworks/unity-bench#18). `None` where the Editor did not offer the counter.
+    """
+    rows = {r['name']: r for r in leak}
+    out = {}
+    for v in variants:
+        resident, survivors, unloaded = ((rows.get(n) or {}).get('cells', {}).get(v) for n in (RESIDENT, SURVIVORS, UNLOADED))
+        if not (resident or survivors):
+            continue
+        out[v] = {'resident_slope': resident['slope'] if resident else None, 'resident_slope_range': resident['slope_range'] if resident else None,
+                  'resident_first': resident['first'] if resident else None, 'resident_last': resident['last'] if resident else None,
+                  'survivors_last': survivors['last'] if survivors else None, 'survivors_slope': survivors['slope'] if survivors else None,
+                  'unloaded_last': unloaded['last'] if unloaded else None,
+                  'points': (resident or survivors)['points'], 'processes': (resident or survivors)['processes']}
+    return out
+
+
+def alc_leaks(processes, variants):
+    """Per variant, what the Editor's own unload-leak detection (`alc_leak_detection`, the `-enable-alc-leak-detection 1` argument) wrote: report files, leaked objects and the first path to a root."""
+    out = {}
+    for v in variants:
+        found = [p['alc_leaks'] for p in processes if p['variant'] == v and p.get('alc_leaks')]
+        if found:
+            first = next((f['first'] for f in found if f.get('first')), None)
+            out[v] = {'processes': len(found), 'files': sum(f['files'] for f in found), 'leaks': sum(f['leaks'] for f in found),
+                      'unreadable': sum(f.get('unreadable', 0) for f in found), 'first': first, 'dirs': [f['dir'] for f in found if f.get('dir')]}
+    return out
 
 
 def markers(processes, variants):

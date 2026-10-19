@@ -43,6 +43,7 @@ namespace UnityBench.Editor
             // A load after a compile finished is the reload an edit step waits for. A load during a Play Mode step is
             // the domain/code reload that entering or exiting Play Mode did cause; with reload disabled none happens.
             if (s.started && !s.reloaded && (s.compileEnd != 0 || IsPlay(s.req.kind))) s.reloaded = true;
+            if (s.phase == "run" && s.req.memory && IsLeak(s.req.kind)) TrackGeneration();   // every generation of the code, also those a reading does not see (Play Mode)
             Save();
             Detach();
             EditorApplication.update += Tick;
@@ -426,6 +427,7 @@ namespace UnityBench.Editor
             }
             catch { }
             MemoryEnd();
+            FreeGenerations();
             // The scene workload writes its own result (also when it failed, with the reason); the Editor's records have nothing to add to it.
             if (!(s.req.kind == "editor.scene_play" && s.sceneDone)) File.WriteAllText(s.req.outPath, ResultWriter.Build(s, code == 0));
             SessionState.EraseString(Key);

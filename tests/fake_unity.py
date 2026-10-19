@@ -21,6 +21,9 @@ Behaviour is chosen by its own options, given before the Unity arguments:
   --leak-mb F      the Editor workloads' memory readings grow by F MB per reload or Play Mode cycle (GC Used Memory; Unity native twice as fast)
   --mem-missing N  comma-separated memory counters this Editor does not offer (they are left out of the readings and listed in memory.missing)
   --no-memory      the Editor reads no memory at all (an older package)
+  --survivors K    the leak workloads count unloaded code contexts (a CoreCLR Editor): K of them stay alive per cycle (1 = every reload leaks, 0 = all collected);
+                   without it the counter is listed as missing (a Mono Editor)
+  --alc-leaks N    with -enable-alc-leak-detection 1, write one Logs/ALCLeaks-*.json per cycle with N leaks each (0 = empty reports)
 """
 import argparse
 import hashlib
@@ -50,6 +53,8 @@ parser.add_argument('--scene-no-render', action='store_true')
 parser.add_argument('--leak-mb', type=float, default=0.0)
 parser.add_argument('--mem-missing', default='')
 parser.add_argument('--no-memory', action='store_true')
+parser.add_argument('--survivors', type=int, default=None)
+parser.add_argument('--alc-leaks', type=int, default=0)
 parser.add_argument('--as-player', action='store_true')
 ours, unity = parser.parse_known_args()
 
@@ -139,7 +144,13 @@ def memory_samples(req, cycles):
     if req['kind'] in ('editor.reload_leak', 'editor.play_leak'):
         for cycle in range(1, cycles + 1):
             out += [{'name': f'leak/{name}', 'ms': value, 'unit': unit, 'phase': None, 'round': cycle - 1, 'info': {}, 'counters': {}} for name, unit, value in readings(cycle)]
-    notes = {'memory.offered': ', '.join(f'{n} ({u})' for n, u, _ in MEMORY), 'memory.missing': ', '.join(filter(None, ours.mem_missing.split(',')))}
+            if ours.survivors is not None:
+                out += [{'name': f'leak/{name}', 'ms': float(value), 'unit': 'count', 'phase': None, 'round': cycle - 1, 'info': {}, 'counters': {}}
+                        for name, value in (('Unloaded contexts still alive', ours.survivors * cycle), ('Unloaded contexts', cycle))]
+    missing = list(filter(None, ours.mem_missing.split(',')))
+    if req['kind'] in ('editor.reload_leak', 'editor.play_leak') and ours.survivors is None:
+        missing.append('Unloaded contexts still alive')
+    notes = {'memory.offered': ', '.join(f'{n} ({u})' for n, u, _ in MEMORY), 'memory.missing': ', '.join(missing)}
     return out, notes
 
 
@@ -206,6 +217,13 @@ if request_path:
             for name, ms in (('play_enter', 800.0), ('play_exit', 300.0)):
                 samples.append({'name': name, 'phase': 'first-use' if r == 0 else 'warm', 'round': r, 'ms': ms * ours.scale, 'hash': None, 'counters': {}, 'info': {'reloaded': True}})
     notes = {}
+    if arg('-enable-alc-leak-detection') == '1' and req['kind'] in ('editor.reload_leak', 'editor.play_leak'):
+        (project / 'Logs').mkdir(exist_ok=True)
+        leak = {'PathToRoot': [{'TypeName': 'System.Reflection.LoaderAllocator', 'Name': 'User #1'}, {'TypeName': 'System.Collections.Generic.Dictionary<System.Type, Unity.Profiling.ProfilerMarker>'},
+                               {'TypeName': 'Unity.Scripting.LifecycleManagement.ScopeTransitionHelper'}],
+                'Root': {'Kind': 'StaticField', 'FieldName': 'Owner::_instance'}}
+        for r in range(req['rounds']):
+            (project / 'Logs' / f'ALCLeaks-{os.getpid()}-{r:03d}.json').write_text(json.dumps({'ALCLeaks': {'Leaks': [leak] * ours.alc_leaks}}))
     mem, mem_notes = memory_samples(req, req['rounds']) if req['kind'] != 'editor.scene_play' else ([], {})
     samples += mem
     notes.update(mem_notes)
