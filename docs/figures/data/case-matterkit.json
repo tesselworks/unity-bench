@@ -1,0 +1,29 @@
+{
+ "meta": {
+  "source": "a comparison of Unity 6.7 and Unity 7 on MatterKit (private project), unity-bench campaigns run by its CI, October 2026",
+  "editors": "6000.7.0b2 (Unity 6.7) and 7000.0.0a9 (Unity 7 alpha 9)",
+  "machine": "Windows 11, Ryzen 9 7900X3D, RTX 4080; other CI jobs on that machine paused while measuring",
+  "processes": "3 to 4 fresh processes per variant; cells are medians of per-process medians",
+  "note": "The C# rows are geometric means of the ratios over the 60 comparable pure C# scenarios of an Editor adapter (Debug and Release code optimization). The 4-bottle row was measured on a Mac with 7000.0.0a7 and has no Unity 7 IL2CPP value."
+ },
+ "editor": [
+  {"label": "60 C# scenarios, Release (geomean)", "ratio": 0.48},
+  {"label": "60 C# scenarios, Debug (geomean)", "ratio": 0.65},
+  {"label": "Enter Play Mode", "ratio": 0.75},
+  {"label": "Open project, no Library", "ratio": 0.90},
+  {"label": "Core API edit to reload done", "ratio": 1.05},
+  {"label": "Exit Play Mode", "ratio": 2.43}
+ ],
+ "player": {
+  "baseline": "Unity 6.7 IL2CPP",
+  "series": ["Unity 7 IL2CPP", "Unity 7 CoreCLR"],
+  "rows": [
+   {"label": "Clean build", "ratios": [0.94, 0.23]},
+   {"label": "catalog: all 26 objects", "ratios": [1.05, 0.84]},
+   {"label": "table: frame median", "ratios": [1.01, 0.95]},
+   {"label": "4 bottles break at once (Mac, alpha 7)", "ratios": [null, 0.39]},
+   {"label": "Launch to first frame", "ratios": [1.03, 1.53]},
+   {"label": "First cut after start", "ratios": [2.07, 2.82]}
+  ]
+ }
+}
