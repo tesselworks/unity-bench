@@ -57,20 +57,28 @@ Details and keys: [docs/workloads.md](docs/workloads.md). Every Editor workload 
 
 ## Sample report
 
-Output of `examples/minimal.toml` on an Apple M-series Mac while other work was running (machine CPU median 59%, max 100%), `repeats = 2`, `rounds = 3`, taken with v0.2 and re-formatted for v0.3 (the numbers are unchanged; v0.3 prints n on both sides of each ratio and the player metric is named `launch_to_probe`). Cells are median [min-max] across processes in ms, n = processes; the ratio is Unity 7 / Unity 6.7. This only shows what the report looks like: n is tiny and the machine was busy.
+Rows from one run of `examples/minimal.toml`, 6000.7.0b2 (Mono) against 7000.0.0a9 (CoreCLR), on 2026-10-19: an Apple M4 Max MacBook Pro (16 CPUs, 48 GB, macOS 26.5.2), unity-bench 0.7.0 at `75171c1`, with `repeats = 2` and `rounds = 3` (the opens 3 repeats, `reload-leak` 10 cycles, `play-leak` 5), 68 processes in 13 minutes, none failed. **The machine was not idle**: other sessions were using it, the load average was 20 with no Unity running just before the start and 17 to 27 in once-a-minute samples during the run, and the report's host table gives machine CPU median 57% (6.7) and 67% (7), max 100%, of which about 42% was other work. Cells are median [min-max] across processes, n = processes after the first-use process is set aside; the ratio is Unity 7 / Unity 6.7. This shows what the report looks like. It is not a benchmark result: n is 1 to 2 and the machine was busy.
 
 | Item | unity-6.7 (A) | unity-7 | unity-7 / unity-6.7 | Work |
 | --- | --- | --- | --- | --- |
-| warm open | 4,612 [3,922-6,175] n=3 | 6,528 [5,156-6,585] n=3 | 1.42 (ranges overlap, n=3 vs 3) | not reported |
-| core/compile+reload | 2,473 [1,882-3,063] n=2 | 3,531 [3,317-3,745] n=2 | 1.43 (ranges separate, n=2 vs 2) | not reported |
-| play_enter, domain reload off | 129 [127-131] n=2 | 28.0 [26.9-29.1] n=2 | 0.22 (ranges separate, n=2 vs 2) | not reported |
-| adapter: xorshift | 2.79 [2.43-3.14] n=2 | 3.47 [3.27-3.67] n=2 | 1.25 (ranges separate, n=2 vs 2) | same |
-| adapter: sha256 | 1,324 [1,130-1,518] n=2 | 16.9 [16.8-16.9] n=2 | 0.01 (ranges separate, n=2 vs 2) | same |
-| player launch_to_probe | 345 [336-355] n=3 | 368 [365-380] n=3 | 1.07 (ranges separate, n=3 vs 3) | not reported |
+| cold open (Library deleted, caches isolated) | 9,399 [8,871-9,926] n=2 | 11,377 [10,335-12,419] n=2 | 1.21 (ranges separate, n=2 vs 2) | not reported |
+| warm open | 3,911 [3,864-3,959] n=2 | 5,199 [5,109-5,290] n=2 | 1.33 (ranges separate, n=2 vs 2) | not reported |
+| core/compile+reload | 1,371 [1,261-1,481] n=2 | 2,073 [1,957-2,188] n=2 | 1.51 (ranges separate, n=2 vs 2) | not reported |
+| play_enter, domain reload on | 677 [675-679] n=2 | 1,357 [1,298-1,415] n=2 | 2.00 (ranges separate, n=2 vs 2) | not reported |
+| play_enter, domain reload off | 17.5 [17.2-17.8] n=2 | 25.1 [24.8-25.3] n=2 | 1.43 (ranges separate, n=2 vs 2) | not reported |
+| adapter: xorshift | 0.760 [0.684-0.837] n=2 | 0.426 [0.403-0.449] n=2 | 0.56 (ranges separate, n=2 vs 2) | same |
+| adapter: sha256 | 187 [187-187] n=2 | 13.4 [13.4-13.5] n=2 | 0.07 (ranges separate, n=2 vs 2) | same |
+| player launch_to_probe | 377 [377-377] n=1 | 355 [355-355] n=1 | 0.94 (ranges separate, n=1 vs 1) | not reported |
+| player adapter: frame steady p50 | 0.803 [0.799-0.807] n=2 | 0.599 [0.599-0.599] n=2 | 0.75 (ranges separate, n=2 vs 2) | not reported |
 
-Under each table the report prints how often ranges separate by chance for the n involved (33% for 2 vs 2, 10% for 3 vs 3).
+Under each table the report prints how often ranges separate by chance for the n involved (33% for 2 vs 2, 100% for 1 vs 1). The leak workloads open with their result instead of a ratio; here `reload-leak` read:
 
-The full report also lists the variants with their resolved project commits and Editor versions, the players' own runtime, build kind and build settings, first-use samples (as a ratio table with `--first-use-ratios`), per-phase reload tables, items whose work or output differed (shown apart, left out of the ratios), a headline aggregate for the items you named, host annotations and failed processes.
+| Variant | App Resident Memory per cycle | First to last (median) | Unloaded contexts still alive (last cycle, median) | Points x processes |
+| --- | --- | --- | --- | --- |
+| unity-6.7 | +3.359 MB [+2.991 MB to +3.728 MB] | 414.6 MB to 448.5 MB | not counted (no collectible contexts: Mono) | 10 x 2 |
+| unity-7 | +2.907 MB [+2.809 MB to +3.005 MB] | 620.0 MB to 647.4 MB | 0 of 10 | 10 x 2 |
+
+The full report also lists the variants with their resolved project commits and Editor versions, the players' own runtime, build kind and build settings, the start state of every workload and how each prepared copy was made, first-use samples, per-phase reload tables, the memory breakdown of every Editor workload, frame and profiler-marker distributions of the scene workloads, items whose work or output differed (shown apart, left out of the ratios), a headline aggregate for the items you named, host annotations and failed processes. The raw `results.jsonl` and `campaign.json` of this run are not in the repository (run directories stay out of git).
 
 ## Honest limits
 
