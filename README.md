@@ -80,7 +80,21 @@ The full report also lists the variants with their resolved project commits and 
 - A newer Editor migrates the project on its first open. Since v0.4 that happens in an untimed priming open, not in a measured sample; `--no-cache` brings back the old behaviour, where that sample is labelled first-use.
 - `cold` isolates what Unity lets us isolate (compilation cache, Package Manager cache, Accelerator, `Library`); the OS file cache, the GPU driver's shader cache and the GI cache are not controlled ([methodology](docs/methodology.md#cache-states)).
 - Player adapters run a built player per repeat and a build per variant, so they are slow to schedule; tail percentiles of a single process are noisy, and the report shows their range across processes rather than a single number.
-- Windows process ownership is verified by CI mocks and native tests on `windows-latest`; Unity workloads have been run on macOS (Apple silicon) and Windows (x64) with Unity 6000.7.0b2 and 7000.0.0a7.
+- Windows process ownership is verified by CI mocks and native tests on `windows-latest`. See [Tested Editors and platforms](#tested-editors-and-platforms) for what ran with real Unity.
+
+## Tested Editors and platforms
+
+| Editor | Editor runtime | macOS, Apple silicon | Windows x64 |
+| --- | --- | --- | --- |
+| 6000.7.0b2 | Mono | example campaign with 0.7.0 | consumer CI with 0.6.0 |
+| 7000.0.0a9 | CoreCLR | example campaign with 0.7.0 | consumer CI with 0.6.0 |
+| 7000.0.0a7 | CoreCLR | the leak control of 0.7.0 (leaks every script reload; superseded by a9) | consumer CI with 0.3.0 to 0.6.0 |
+
+"Consumer CI" is the benchmark CI of two projects that use Unity Bench, MatterKit and Spill, on a Windows x64 machine; their campaigns are private. Player backends: the example campaign builds Mono (6.7) and CoreCLR (7) players; the consumer CI also built IL2CPP players on both Editors. The Python side is tested on Linux and Windows by this repository's CI, with a stand-in Editor. Other Editor versions and Linux Editors have not been run.
+
+## Reproducing published results
+
+A result made with Unity Bench can be re-aggregated without Unity from its raw `results.jsonl` and `campaign.json`, with the framework commit and report options its `summary.md` names: see [Reproducing a published result](docs/methodology.md#reproducing-a-published-result).
 
 ## Repository layout
 

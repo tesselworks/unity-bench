@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
+
+Ready to be public: an unload-leak check that works on CoreCLR, a content-based cache key, a sample report from a real run and a walked pre-release checklist. Philosophy unchanged: annotate, do not refuse.
+
+Tested Editors: 6000.7.0b2 (Mono) and 7000.0.0a9 (CoreCLR). macOS (Apple silicon) with this version; Windows x64 with 0.6.0, through the CI of two consumer projects (MatterKit and Spill). 7000.0.0a7 is the known-leaking control for the unload counter.
 
 ### Fixed
 
@@ -14,9 +18,17 @@
 - **The result of a leak workload comes first**: a table per variant with the `App Resident Memory` slope per cycle (least squares, range over processes) and the unloaded contexts still alive after the last cycle; `leak_headline` in `summary.json`.
 - **`alc_leak_detection = true`** on `editor.reload_leak` / `editor.play_leak` runs the Editor with `-enable-alc-leak-detection 1`, moves the `Logs/ALCLeaks-*.json` reports it writes into `<run dir>/alc-leaks/<process>/` and reports the number of files and leaked objects and the first path to a root. `alc_leaks` on the process row and in `summary.json`.
 
+### Behaviour that changes
+
+- `examples/minimal.toml` uses 7000.0.0a9 for its Unity 7 variant (7000.0.0a7 leaks every script reload, see tesselworks/unity-bench#18).
+- `package.json` and the framework are 0.7.0.
+
 ### Documentation
 
 - [methodology](docs/methodology.md#memory-counters) no longer says that a rising assembly count detects an unload leak, and corrects the v0.6 reading of the first runs ("both flat" did not mean that no old code stayed loaded). It says why `App Resident Memory`, not RSS, is the process metric for a leak on macOS (in a leaking run, RSS 1.4 GB against a physical footprint of 13.6 GB), and how the survivor count works ([Unloaded contexts](docs/methodology.md#unloaded-contexts)).
+
+- The README's sample report is from a run of `examples/minimal.toml` with this version, with n, machine, date, framework commit and machine load stated; it replaces the v0.2 one. The README says which Editors and platforms were tested and points to [Reproducing a published result](docs/methodology.md#reproducing-a-published-result).
+- [Pre-release checklist](docs/public-repository.md): walked for this release; the security items that can only be set on a public repository are marked for the day it goes public.
 
 ## 0.6.0
 
