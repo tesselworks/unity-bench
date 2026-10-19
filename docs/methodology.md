@@ -192,6 +192,19 @@ The report prints the same thing per run: "Memory counters this process did not 
 
 A first identical run gave the same CoreCLR slopes to within 0.2 MB (managed, native) and 0.1 MB (resident); the Mono native slope was 9.0 MB then and 10.7 MB now, so read it as 9 to 11. `editor.play_leak` (10 cycles) gave the same picture: Mono native +8.9 MB, managed +0.07 MB, resident +0.8 MB per cycle; CoreCLR native +22.3 MB, managed +4.1 MB, resident +118 MB per cycle. Where the slopes are measured, then: on this alpha, the CoreCLR Editor grows with every reload and the Mono one grows only in Unity-native memory, at about half the rate or less. The number of assemblies and load contexts does not grow on either, and that was read at the time as "no old code stays loaded". It was wrong: the lists hide unloaded contexts, and a weak reference to each earlier generation showed that every one of them stayed alive on 7000.0.0a7 (tesselworks/unity-bench#18). The cause was in the Editor and is fixed in 7000.0.0a9; the survivor count below is the check.
 
+**The survivor count, checked** (0.7.0, 2026-10-19, the same Mac and example project, 2 processes per Editor, the machine shared with other work: machine CPU median 36 to 39% during the processes). `editor.reload_leak` with 10 reloads of the leaf comment edit, and `editor.play_leak` with 5 cycles, domain reload on:
+
+| | 6000.7.0b2 (Mono) | 7000.0.0a7 (CoreCLR, leaks) | 7000.0.0a9 (CoreCLR, fixed) |
+| --- | --- | --- | --- |
+| reload: `App Resident Memory` per reload | +4.0 MB [1.3, 6.6] | +121.0 MB [120.3, 121.6] (721 MB to 1.77 GB) | +0.3 MB [-1.8, 2.5] |
+| reload: `Unloaded contexts still alive` after reload 1, 2, ..., 10 | not counted | 1, 2, ..., 10 (all of them, both processes) | 0 at every reading |
+| reload: `Loaded Assemblies`, `AssemblyLoadContexts` | 196, n/a | 272 to 274, 3 | 270 to 271, 3 |
+| Play Mode: `App Resident Memory` per cycle | +5.1 MB | +117.7 MB | +3.1 MB |
+| Play Mode: `Unloaded contexts still alive` after 5 cycles | not counted | 5 of 5 | 0 of 5 |
+| reload with `alc_leak_detection` (5 reloads, 2 processes) | no reports | 10 report files, 12 leaked objects; first path `LoaderAllocator "User #1"` to `LifecycleController::_instance` through `DelegateAutoCleanup` | 2 report files, 0 leaked objects |
+
+The count follows the leak exactly where the assembly and context counts stay flat, and reads 0 on the Editor where the leak is fixed. The detection itself costs memory: with it on, 7000.0.0a9 grew 19 MB per reload instead of 0.3 MB, which is why it belongs in a workload of its own.
+
 The reading itself is not the cause. A control with the readings off (`editor.script_edit`, 30 rounds, `memory = false`, one process, CoreCLR) still peaked at 2.9 GB resident in the runner's once-a-second sample, from 0.6 GB at the start; with readings on, 3.5 GB; `force_gc = false` 3.5 GB (one process each, so the 0.6 GB difference is not established). Treat the CoreCLR figures as a property of an alpha Editor on one machine, and rerun them on the Editor you ship.
 
 ## Summary
