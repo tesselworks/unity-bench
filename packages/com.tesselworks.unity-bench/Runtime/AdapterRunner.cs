@@ -99,7 +99,11 @@ namespace UnityBench.Player
             var dot = name.LastIndexOf('.');
             var typeName = name.Substring(0, dot);
             var methodName = name.Substring(dot + 1);
+            // UAC0005 warns that this can list unloaded assemblies in the Editor. In a player nothing is unloaded; in the Editor (editor.scene_play)
+            // it looks the type up by name in Play Mode, after the reload, and takes the first assembly that has it.
+#pragma warning disable UAC0005
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+#pragma warning restore UAC0005
             {
                 var type = assembly.GetType(typeName, false);
                 var found = type?.GetMethod(methodName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, null, new[] { typeof(PlayerContext) }, null);

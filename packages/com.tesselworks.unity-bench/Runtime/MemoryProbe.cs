@@ -155,7 +155,10 @@ namespace UnityBench.Player
             else missing?.Add(".NET GC Pause Total");
             // Assemblies in the process and (CoreCLR) the AssemblyLoadContexts listed. Neither detects an unload leak on CoreCLR: both lists drop a context as soon as
             // Unload() is called, even if it is never collected (tesselworks/unity-bench#18). The leak workloads count the survivors instead (BatchMemory.cs).
+            // UAC0005 (it can list unloaded assemblies) is the point of this counter: it reports what the runtime lists.
+#pragma warning disable UAC0005
             values.Add(new MemoryValue { Name = "Loaded Assemblies", Unit = "count", Value = AppDomain.CurrentDomain.GetAssemblies().Length });
+#pragma warning restore UAC0005
             var contexts = CountContexts();
             if (contexts >= 0) values.Add(new MemoryValue { Name = "AssemblyLoadContexts", Unit = "count", Value = contexts });
             else missing?.Add("AssemblyLoadContexts");

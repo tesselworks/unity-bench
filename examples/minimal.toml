@@ -34,7 +34,7 @@ backend = "mono"                 # scripting backend of the player builds
 
 [[variants]]
 id = "unity-7"
-editor = "/Applications/Unity/Hub/Editor/7000.0.0a7/Unity.app/Contents/MacOS/Unity"
+editor = "/Applications/Unity/Hub/Editor/7000.0.0a9/Unity.app/Contents/MacOS/Unity"
 backend = "coreclr"
 
 [[workloads]]
