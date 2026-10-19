@@ -26,7 +26,6 @@ Tested Editors: 6000.7.0b2 (Mono) and 7000.0.0a9 (CoreCLR). macOS (Apple silicon
 ### Documentation
 
 - [methodology](docs/methodology.md#memory-counters) no longer says that a rising assembly count detects an unload leak, and corrects the v0.6 reading of the first runs ("both flat" did not mean that no old code stayed loaded). It says why `App Resident Memory`, not RSS, is the process metric for a leak on macOS (in a leaking run, RSS 1.4 GB against a physical footprint of 13.6 GB), and how the survivor count works ([Unloaded contexts](docs/methodology.md#unloaded-contexts)).
-
 - The README's sample report is from a run of `examples/minimal.toml` with this version, with n, machine, date, framework commit and machine load stated; it replaces the v0.2 one. The README says which Editors and platforms were tested and points to [Reproducing a published result](docs/methodology.md#reproducing-a-published-result).
 - [Pre-release checklist](docs/public-repository.md): walked for this release; the security items that can only be set on a public repository are marked for the day it goes public.
 
