@@ -44,7 +44,7 @@ To measure your own project: point `[project] path` at it, list your Editors und
 | `editor.cold_open`, `editor.warm_open` | open the project with and without `Library` |
 | `editor.script_edit` | edit a leaf / widely-referenced / public-API script: compile time, compile+reload time, assemblies compiled, and the reload breakdown parsed from the Editor log |
 | `editor.play` | Enter/Exit Play Mode, with the project's settings or with domain reload disabled |
-| `editor.reload_leak`, `editor.play_leak` | N script-edit reloads (default 30) or Play Mode cycles (default 10) in one Editor, with memory read after each: first and last value and the slope per cycle (MB) of managed heap, Unity native, graphics and process memory |
+| `editor.reload_leak`, `editor.play_leak` | N script-edit reloads (default 30) or Play Mode cycles (default 10) in one Editor, with memory read after each: first and last value and the slope per cycle (MB) of managed heap, Unity native, graphics and process memory, and on CoreCLR how many unloaded code contexts are still alive |
 | `editor.adapter` | your C# entry point: samples, per-frame distributions, work counters, output hash |
 | `player.build_time` | `BuildPipeline.BuildPlayer`, clean or incremental, per scripting backend |
 | `player.startup` | launch a built player until its probe frame (`launch_to_probe`: after the first scene loaded and two frames ran; not a presented frame) |
