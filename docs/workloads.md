@@ -119,13 +119,13 @@ Every Editor process that runs a built-in workload through the package (everythi
 Does an Editor keep growing when the same code is reloaded again and again? One Editor process runs N cycles and reads its memory after every one; the report fits a line through the readings.
 
 ```mermaid
-flowchart TB
-  E["one cycle: edit a script and refresh (reload_leak)<br/>or enter and exit Play Mode (play_leak)"] --> I["wait until compile and reload are done<br/>and the Editor is idle"]
-  I --> G["force_gc (default): GC.Collect, WaitForPendingFinalizers,<br/>GC.Collect, UnloadUnusedAssetsImmediate"]
-  G --> M["read every memory counter<br/>(leak/counter, round = cycle)"]
-  M --> V["CoreCLR: check the weak handles to earlier code generations,<br/>collect again up to 5 times while one is alive"]
+flowchart LR
+  E["one cycle:<br/>script edit, or<br/>Play Mode in and out"] --> I["wait until<br/>the Editor<br/>is idle"]
+  I --> G["force_gc:<br/>collect garbage,<br/>unload assets"]
+  G --> M["read every<br/>memory counter"]
+  M --> V["CoreCLR: count<br/>old code generations<br/>still alive"]
   V -- "next cycle" --> E
-  V -. "after N cycles" .-> R["report: slope per cycle, App Resident slope,<br/>unloaded contexts still alive"]
+  V -. "after N" .-> R["report:<br/>slope per cycle,<br/>contexts alive"]
 ```
 
 ```toml

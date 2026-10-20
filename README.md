@@ -11,10 +11,10 @@ Compare the same Unity project across Editor versions or player scripting backen
 
 ```mermaid
 flowchart LR
-  C["campaign.toml<br/>variants, workloads"] --> P["plan<br/>balanced A/B order"]
-  P --> R["run<br/>a fresh process per repeat:<br/>Editor or built player"]
-  R --> D[("results.jsonl (raw)<br/>campaign.json (provenance)")]
-  D --> S["report: summary.md, summary.json<br/>per-process medians, ranges,<br/>ratios, annotations"]
+  C["campaign.toml<br/>variants,<br/>workloads"] --> P["plan<br/>balanced<br/>A/B order"]
+  P --> R["run<br/>a fresh process<br/>per repeat"]
+  R --> D[("results.jsonl<br/>campaign.json")]
+  D --> S["report<br/>medians, ranges,<br/>ratios, annotations"]
 ```
 
 A campaign names the variants (a project revision, an Editor, a player backend) and the workloads. The order is fixed before anything runs, every repeat is a new process with a timeout, and the raw rows are never filtered: `unity-bench report` regenerates the summary from them at any time, with other options. Details: [methodology](docs/methodology.md).
@@ -92,16 +92,15 @@ Every Editor workload and the scene workloads also report a memory breakdown (ma
 ```mermaid
 flowchart LR
   subgraph once["once per variant, kept across runs"]
-    direction TB
-    A["project copy<br/>+ Unity package<br/>+ project.prepare"] --> B["priming open<br/>(untimed import, migration)"]
-    B --> S[("snapshot, keyed by content<br/>reused by later runs<br/>with the same key")]
+    A["project copy,<br/>Unity package,<br/>project.prepare"] --> B["priming open<br/>(untimed)"]
+    B --> S[("snapshot<br/>keyed by content")]
   end
-  S --> W["warm<br/>snapshot restored<br/>before every process"]
-  S --> X["as-is<br/>whatever the previous<br/>process left"]
-  S --> C["cold<br/>Library deleted, global<br/>caches empty for<br/>this one process"]
+  S --> W["warm<br/>snapshot restored<br/>before each process"]
+  S --> X["as-is<br/>what the previous<br/>process left"]
+  S --> C["cold<br/>no Library, empty<br/>global caches"]
 ```
 
-Every workload that starts an Editor names its start state (`state = "cold" | "warm" | "as-is"`), and every process records the state it really had; a state that cannot be set up runs `as-is` with a note. `cold` never touches your own caches: it points them at empty directories for that one process. The OS file cache, the GPU driver's shader cache and the GI cache are not controlled. More: [methodology](docs/methodology.md#cache-states).
+A later run with the same key restores the snapshot instead of preparing again. Every workload that starts an Editor names its start state (`state = "cold" | "warm" | "as-is"`), and every process records the state it really had; a state that cannot be set up runs `as-is` with a note. `cold` never touches your own caches: it points them at empty directories for that one process. The OS file cache, the GPU driver's shader cache and the GI cache are not controlled. More: [methodology](docs/methodology.md#cache-states).
 
 ## Sample report
 
