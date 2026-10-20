@@ -20,6 +20,12 @@ Player builds can also hold three Unity player settings equal across Editors, wi
 
 The schedule is fixed before anything runs (`unity-bench plan <campaign>` prints it, with a note for anything it changed on purpose):
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/schedule-dark.svg">
+  <img alt="Eight fresh processes in the order A B B A A B B A, each with a few samples whose first is a first-use sample; one median per process; per variant the median of the process medians with its min-max range; ratio B/A with ranges separate and the chance of that for 4 vs 4" src="figures/schedule-light.svg" width="860">
+</picture>
+
+
 - For each workload, for each repeat, the variants run in a balanced order, so that slow drift (thermal state, caches, background work) and "who ran right after whom" are spread over the variants instead of loaded onto one.
   - **Two variants** alternate: A,B then B,A then A,B, and so on.
   - **More than two variants** run each rotation followed by its reverse: for A,B,C that is ABC, CBA, BCA, ACB, CAB, BAC. Any two consecutive repeats put every pair in both orders, so every compared pair runs in both orders equally often, and `2n` repeats also put each variant in each position equally often. A plain rotation does not do this (ABC then BCA always runs A before B and B before C in the first half). Because the balance needs pairs of repeats, **`repeats` is raised to the next even number for more than two variants** (`repeats = 3` runs 4); `plan` and the report say so. With two variants an odd `repeats` ends one repeat unbalanced; that is the price of keeping the number you asked for.
@@ -35,6 +41,23 @@ When a process ends, every process still alive in its group (POSIX) or job (Wind
 ## Cache states
 
 Unity caches in many places, and "cold" used to mean only "`Library` deleted". Each workload that starts an Editor on the project (`editor.*`, `player.build_time`) now says where it starts with `state`, and every process records the state it actually had.
+
+```mermaid
+flowchart TD
+  K["cache key: project content (git trees),<br/>Editor version and revision, backend and build settings,<br/>packages-lock, injected package, prepare step, live path"] --> L{"an entry with this key,<br/>and its manifest still matches?"}
+  L -- "yes" --> RS["restore the entry into the live copy<br/>prepared: reused"]
+  L -- "no" --> P["prepare the copy: checkout or copy,<br/>inject the package, project.prepare"]
+  P --> PO["priming open (untimed, -quit)"]
+  PO --> E{"Editor exited 0?"}
+  E -- "yes" --> SN[("snapshot = cache entry<br/>Library included, no .git, Temp, Logs")]
+  E -- "no" --> U["run on the unprimed copy,<br/>nothing cached"]
+  SN --> LIVE["live copy at a fixed path"]
+  RS --> LIVE
+  LIVE --> ST{"state of the workload"}
+  ST -- "warm" --> W["restore the snapshot before every process,<br/>verify it against the manifest"]
+  ST -- "cold" --> C["delete Library, point the compilation,<br/>Package Manager and Accelerator caches<br/>at empty directories for this process"]
+  ST -- "as-is" --> A["start from what the previous process left"]
+```
 
 | State | The process starts from | Default for |
 | --- | --- | --- |
@@ -94,7 +117,7 @@ Not isolated:
 
 ## What is measured
 
-Built-in workloads measure wall time with the clock described in [workloads.md](workloads.md): the whole Editor process for opens, in-Editor stopwatches for edits, Play Mode and builds, a file timestamp for player startup. Project adapters bring their own stopwatch around exactly the work they care about ([adapters.md](adapters.md)).
+Built-in workloads measure wall time with the clock described in [workloads.md](workloads.md): the whole Editor process for opens, in-Editor stopwatches for edits, Play Mode and builds, a file timestamp for player startup. Project adapters bring their own stopwatch around exactly the work they care about ([adapters.md](adapters.md)). Where a script reload spends its time is parsed from the Editor log ([Reload breakdown](workloads.md#reload-breakdown)).
 
 Each measurement is a **sample** with a name, a `phase` and milliseconds. The phase says what kind of execution it was:
 
@@ -233,6 +256,12 @@ Pick headline items that answer the question you are asking, say why in your wri
 ### Statistics honesty
 
 This describes what happened in n processes. It is not a significance test.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/chance-separate-dark.svg">
+  <img alt="Bar chart of the chance that ranges separate with no real difference, 2 / C(2n, n): 100% for 1 vs 1, 33% for 2 vs 2, 10% for 3 vs 3, 2.9% for 4 vs 4, 0.79% for 5 vs 5, 0.22% for 6 vs 6" src="figures/chance-separate-light.svg" width="720">
+</picture>
+
 
 - **Ranges separate by chance.** With no real difference, two groups of a and b processes have completely separated ranges (in either direction) with probability `2 / C(a+b, a)`: 33% for 2 vs 2, 10% for 3 vs 3, 2.9% for 4 vs 4, 0.8% for 5 vs 5. The report prints the probability for the sizes in each table. With n = 2 or 3, one in three or one in ten items looks "separated" for nothing; read separated ranges across many items and with the sizes in view.
 - **Samples are not repeats.** 1,000 frame times in one process are one process. The unit of repeat is the process, and a tail percentile of one process is itself a noisy number.

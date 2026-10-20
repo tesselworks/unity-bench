@@ -2,6 +2,26 @@
 
 A **workload** is something a campaign measures. Built-in workloads ([workloads.md](workloads.md)) work on any project. A project adds its own with an **adapter**: a C# entry point that does the project's real work and reports samples, work counters and an output hash. The runner invokes it, collects the result file and does the statistics.
 
+```mermaid
+sequenceDiagram
+  participant R as runner (Python)
+  participant P as Editor or player process
+  participant A as your adapter
+  participant F as result file
+  R->>R: write the request file (workload, variant, rounds, args)
+  R->>P: start a fresh process with an explicit timeout
+  P->>A: call the entry point with AdapterContext or PlayerContext
+  loop rounds, or frames in a player
+    A->>A: Measure, Add, AddDistribution, RecordFrames
+  end
+  A-->>P: samples, work counters, hash, work groups, headline
+  P->>F: write the result (schema 1)
+  P-->>R: exit, or the tree is killed on timeout
+  R->>F: read and check it (a malformed file fails only this process)
+  R->>R: append to results.jsonl
+  Note over R: report: phases, distributions to p50/p95/p99/max,<br/>work identity, medians, ratios
+```
+
 ## Editor adapter (`editor.adapter`)
 
 Add the package `packages/com.tesselworks.unity-bench` to the project (the runner injects it into its project copies by default, `project.inject_package = true`), reference the assembly `UnityBench.Editor` from an Editor assembly definition, and write:

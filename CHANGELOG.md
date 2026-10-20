@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+
+- The README shows how a run works, an annotated report row, the workloads, the cache states, the sample report and the #18 leak control as diagrams and charts, with the tables kept in collapsed blocks, and adds a short Case studies section (MatterKit, Spill). The docs gain a schedule figure, a cache diagram and a chart of the chance of separated ranges ([methodology](docs/methodology.md)), the adapter lifecycle ([adapters](docs/adapters.md)), and the reload phases, the leak cycle and the scene-hooks flow ([workloads](docs/workloads.md)). `python3 docs/figures/make_figures.py` regenerates the SVG figures from `docs/figures/data/`.
+
 ## 0.7.0
 
 Ready to be public: an unload-leak check that works on CoreCLR, a content-based cache key, a sample report from a real run and a walked pre-release checklist. Philosophy unchanged: annotate, do not refuse.
