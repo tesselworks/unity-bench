@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 398" width="860" height="398" role="img" aria-label="Annotate, don&#x27;t refuse: one row of a report">
+<title>Annotate, don&#x27;t refuse: one row of a report</title>
+<style>text{font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif}.f-card{fill:#151B23}.f-node{fill:#0D1117}.f-soft{fill:#262C36}.f-bar{fill:#8B949E}.f-accent{fill:#A68BFA}.f-tint{fill:#251E3D}.t-ink{fill:#E6EDF3}.t-muted{fill:#9198A1}.t-accent-text{fill:#C9B8FF}.t-on-accent{fill:#0D1117}.s-hairline{stroke:#3D444D}.s-grid{stroke:#262C36}.s-flow{stroke:#768390}.s-accent{stroke:#A68BFA}.s-bar{stroke:#8B949E}</style>
+<rect x="0.5" y="0.5" width="859" height="397" rx="12" class="f-card s-hairline" stroke-width="1"/>
+<text x="24.0" y="34.0" font-size="17" font-weight="600" text-anchor="start" class="t-ink">Annotate, don&#x27;t refuse: one row of a report</text>
+<text x="24.0" y="56.0" font-size="12.5" text-anchor="start" class="t-muted">The row is from the sample run (Editor adapter, xorshift). Nothing here stopped or discarded a measurement.</text>
+<rect x="124.0" y="88.0" width="392.0" height="42.0" rx="8" class="f-tint"/>
+<text x="136.0" y="105.0" font-size="13" font-weight="600" text-anchor="start" class="t-accent-text">Host load is recorded, not judged</text>
+<text x="136.0" y="122.0" font-size="12" text-anchor="start" class="t-ink">other CPU median 43% (6.7), 42% (7): machine minus the launched tree</text>
+<line x1="320.0" y1="130.0" x2="320.0" y2="144.0" class="s-accent" stroke-width="1.5"/>
+<rect x="24.0" y="144.0" width="812.0" height="64.0" rx="8" class="f-node s-hairline" stroke-width="1"/>
+<line x1="24.0" y1="174.0" x2="836.0" y2="174.0" class="s-hairline" stroke-width="1"/>
+<text x="34.0" y="164.0" font-size="13" font-weight="600" text-anchor="start" class="t-ink">Item</text>
+<text x="34.0" y="195.0" font-size="13" text-anchor="start" class="t-ink">xorshift</text>
+<line x1="124.0" y1="144.0" x2="124.0" y2="208.0" class="s-hairline" stroke-width="1"/>
+<text x="134.0" y="164.0" font-size="13" font-weight="600" text-anchor="start" class="t-ink">unity-6.7 (A)</text>
+<text x="134.0" y="195.0" font-size="13" text-anchor="start" class="t-ink" style="font-family:ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace">0.760 [0.684-0.837] n=2</text>
+<line x1="320.0" y1="144.0" x2="320.0" y2="208.0" class="s-hairline" stroke-width="1"/>
+<text x="330.0" y="164.0" font-size="13" font-weight="600" text-anchor="start" class="t-ink">unity-7</text>
+<text x="330.0" y="195.0" font-size="13" text-anchor="start" class="t-ink" style="font-family:ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace">0.426 [0.403-0.449] n=2</text>
+<line x1="516.0" y1="144.0" x2="516.0" y2="208.0" class="s-hairline" stroke-width="1"/>
+<text x="526.0" y="164.0" font-size="13" font-weight="600" text-anchor="start" class="t-ink">unity-7 / unity-6.7</text>
+<text x="526.0" y="195.0" font-size="13" text-anchor="start" class="t-ink">0.56 (ranges separate, n=2 vs 2)</text>
+<line x1="762.0" y1="144.0" x2="762.0" y2="208.0" class="s-hairline" stroke-width="1"/>
+<text x="772.0" y="164.0" font-size="13" font-weight="600" text-anchor="start" class="t-ink">Work</text>
+<text x="772.0" y="195.0" font-size="13" text-anchor="start" class="t-accent-text">same</text>
+<rect x="24.0" y="252.0" width="260.0" height="122.0" rx="8" class="f-node s-hairline" stroke-width="1"/>
+<rect x="24.0" y="252.0" width="4.0" height="122.0" rx="2" class="f-accent"/>
+<text x="38.0" y="274.0" font-size="13" font-weight="600" text-anchor="start" class="t-ink">First use is set apart</text>
+<text x="38.0" y="294.0" font-size="12" text-anchor="start" class="t-ink">Round 0 of each process (first call, JIT)</text>
+<text x="38.0" y="310.0" font-size="12" text-anchor="start" class="t-ink">took 2.24 and 2.67 ms on 6.7, 2.38 and</text>
+<text x="38.0" y="326.0" font-size="12" text-anchor="start" class="t-ink">2.49 ms on 7. Kept in results.jsonl and in</text>
+<text x="38.0" y="342.0" font-size="12" text-anchor="start" class="t-ink">the first-use table, left out of these</text>
+<text x="38.0" y="358.0" font-size="12" text-anchor="start" class="t-ink">medians.</text>
+<polyline points="222.0,208.0 222.0,228.0 154.0,228.0 154.0,252.0" fill="none" class="s-accent" stroke-width="1.5" stroke-linejoin="round"/>
+<circle cx="222.0" cy="208.0" r="3" class="f-accent"/>
+<polyline points="418.0,208.0 418.0,228.0 154.0,228.0 154.0,252.0" fill="none" class="s-accent" stroke-width="1.5" stroke-linejoin="round"/>
+<circle cx="418.0" cy="208.0" r="3" class="f-accent"/>
+<rect x="300.0" y="252.0" width="260.0" height="122.0" rx="8" class="f-node s-hairline" stroke-width="1"/>
+<rect x="300.0" y="252.0" width="4.0" height="122.0" rx="2" class="f-accent"/>
+<text x="314.0" y="274.0" font-size="13" font-weight="600" text-anchor="start" class="t-ink">Ranges separate, with the odds</text>
+<text x="314.0" y="294.0" font-size="12" text-anchor="start" class="t-ink">Every Unity 7 process was faster than</text>
+<text x="314.0" y="310.0" font-size="12" text-anchor="start" class="t-ink">every 6.7 process. With no real difference</text>
+<text x="314.0" y="326.0" font-size="12" text-anchor="start" class="t-ink">that happens 33% of the time for 2 vs 2; the</text>
+<text x="314.0" y="342.0" font-size="12" text-anchor="start" class="t-ink">report prints it under every table.</text>
+<polyline points="639.0,208.0 639.0,228.0 430.0,228.0 430.0,252.0" fill="none" class="s-accent" stroke-width="1.5" stroke-linejoin="round"/>
+<circle cx="639.0" cy="208.0" r="3" class="f-accent"/>
+<rect x="576.0" y="252.0" width="260.0" height="122.0" rx="8" class="f-node s-hairline" stroke-width="1"/>
+<rect x="576.0" y="252.0" width="4.0" height="122.0" rx="2" class="f-accent"/>
+<text x="590.0" y="274.0" font-size="13" font-weight="600" text-anchor="start" class="t-ink">Work identity: same</text>
+<text x="590.0" y="294.0" font-size="12" text-anchor="start" class="t-ink">Hash and counters agreed in 6 of 6 samples</text>
+<text x="590.0" y="310.0" font-size="12" text-anchor="start" class="t-ink">on 6.7 and 6 of 6 on 7. One side silent</text>
+<text x="590.0" y="326.0" font-size="12" text-anchor="start" class="t-ink">reads partial; a mismatch takes the row out</text>
+<text x="590.0" y="342.0" font-size="12" text-anchor="start" class="t-ink">of the ratios.</text>
+<polyline points="799.0,208.0 799.0,228.0 706.0,228.0 706.0,252.0" fill="none" class="s-accent" stroke-width="1.5" stroke-linejoin="round"/>
+<circle cx="799.0" cy="208.0" r="3" class="f-accent"/>
+</svg>

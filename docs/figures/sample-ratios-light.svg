@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 520" width="820" height="520" role="img" aria-label="Sample report: Unity 7 / Unity 6.7">
+<title>Sample report: Unity 7 / Unity 6.7</title>
+<style>text{font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif}.f-card{fill:#F6F8FA}.f-node{fill:#FFFFFF}.f-soft{fill:#EAEEF2}.f-bar{fill:#57606A}.f-accent{fill:#7B4FE8}.f-tint{fill:#F1ECFF}.t-ink{fill:#1F2328}.t-muted{fill:#59636E}.t-accent-text{fill:#5532A8}.t-on-accent{fill:#FFFFFF}.s-hairline{stroke:#D1D9E0}.s-grid{stroke:#E4E8EC}.s-flow{stroke:#818B98}.s-accent{stroke:#7B4FE8}.s-bar{stroke:#57606A}</style>
+<rect x="0.5" y="0.5" width="819" height="519" rx="12" class="f-card s-hairline" stroke-width="1"/>
+<text x="24.0" y="34.0" font-size="17" font-weight="600" text-anchor="start" class="t-ink">Sample report: Unity 7 / Unity 6.7</text>
+<text x="24.0" y="56.0" font-size="12.5" text-anchor="start" class="t-muted">Ratio of medians across processes, log axis. Left of 1×: Unity 7 took less time.</text>
+<text x="24.0" y="74.0" font-size="12.5" text-anchor="start" class="t-muted">One run of examples/minimal.toml, 6000.7.0b2 (Mono) vs 7000.0.0a9 (CoreCLR), on a busy Apple M4 Max.</text>
+<line x1="299.6" y1="104.0" x2="299.6" y2="434.0" class="s-grid" stroke-width="1"/>
+<text x="299.6" y="450.0" font-size="12" text-anchor="middle" class="t-muted">0.05×</text>
+<line x1="373.0" y1="104.0" x2="373.0" y2="434.0" class="s-grid" stroke-width="1"/>
+<text x="373.0" y="450.0" font-size="12" text-anchor="middle" class="t-muted">0.1×</text>
+<line x1="470.0" y1="104.0" x2="470.0" y2="434.0" class="s-grid" stroke-width="1"/>
+<text x="470.0" y="450.0" font-size="12" text-anchor="middle" class="t-muted">0.25×</text>
+<line x1="543.4" y1="104.0" x2="543.4" y2="434.0" class="s-grid" stroke-width="1"/>
+<text x="543.4" y="450.0" font-size="12" text-anchor="middle" class="t-muted">0.5×</text>
+<line x1="616.8" y1="104.0" x2="616.8" y2="434.0" class="s-flow" stroke-width="1.2"/>
+<text x="616.8" y="450.0" font-size="12" text-anchor="middle" class="t-ink">1×</text>
+<line x1="690.2" y1="104.0" x2="690.2" y2="434.0" class="s-grid" stroke-width="1"/>
+<text x="690.2" y="450.0" font-size="12" text-anchor="middle" class="t-muted">2×</text>
+<text x="796.0" y="100.0" font-size="11" text-anchor="end" class="t-muted">processes</text>
+<text x="260.0" y="132.5" font-size="13" text-anchor="end" class="t-ink">cold open</text>
+<rect x="616.8" y="120.0" width="20.2" height="16.0" rx="3" class="f-accent"/>
+<text x="642.1" y="132.0" font-size="12" text-anchor="start" class="t-ink">1.21</text>
+<text x="796.0" y="132.5" font-size="12" text-anchor="end" class="t-muted">n=2 vs 2</text>
+<text x="260.0" y="168.5" font-size="13" text-anchor="end" class="t-ink">warm open</text>
+<rect x="616.8" y="156.0" width="30.1" height="16.0" rx="3" class="f-accent"/>
+<text x="652.0" y="168.0" font-size="12" text-anchor="start" class="t-ink">1.33</text>
+<text x="796.0" y="168.5" font-size="12" text-anchor="end" class="t-muted">n=2 vs 2</text>
+<text x="260.0" y="204.5" font-size="13" text-anchor="end" class="t-ink">script edit: core, compile+reload</text>
+<rect x="616.8" y="192.0" width="43.8" height="16.0" rx="3" class="f-accent"/>
+<text x="665.6" y="204.0" font-size="12" text-anchor="start" class="t-ink">1.51</text>
+<text x="796.0" y="204.5" font-size="12" text-anchor="end" class="t-muted">n=2 vs 2</text>
+<text x="260.0" y="240.5" font-size="13" text-anchor="end" class="t-ink">Play Mode enter, domain reload on</text>
+<rect x="616.8" y="228.0" width="73.6" height="16.0" rx="3" class="f-accent"/>
+<text x="695.5" y="240.0" font-size="12" text-anchor="start" class="t-ink">2.00</text>
+<text x="796.0" y="240.5" font-size="12" text-anchor="end" class="t-muted">n=2 vs 2</text>
+<text x="260.0" y="276.5" font-size="13" text-anchor="end" class="t-ink">Play Mode enter, domain reload off</text>
+<rect x="616.8" y="264.0" width="38.0" height="16.0" rx="3" class="f-accent"/>
+<text x="659.8" y="276.0" font-size="12" text-anchor="start" class="t-ink">1.43</text>
+<text x="796.0" y="276.5" font-size="12" text-anchor="end" class="t-muted">n=2 vs 2</text>
+<text x="260.0" y="312.5" font-size="13" text-anchor="end" class="t-ink">Editor adapter: xorshift</text>
+<rect x="555.6" y="300.0" width="61.2" height="16.0" rx="3" class="f-accent"/>
+<text x="550.6" y="312.0" font-size="12" text-anchor="end" class="t-ink">0.56</text>
+<text x="796.0" y="312.5" font-size="12" text-anchor="end" class="t-muted">n=2 vs 2</text>
+<text x="260.0" y="348.5" font-size="13" text-anchor="end" class="t-ink">Editor adapter: sha256</text>
+<rect x="338.2" y="336.0" width="278.6" height="16.0" rx="3" class="f-accent"/>
+<text x="333.2" y="348.0" font-size="12" text-anchor="end" class="t-ink">0.07</text>
+<text x="796.0" y="348.5" font-size="12" text-anchor="end" class="t-muted">n=2 vs 2</text>
+<text x="260.0" y="384.5" font-size="13" text-anchor="end" class="t-muted">player launch_to_probe</text>
+<rect x="610.3" y="372.0" width="6.5" height="16.0" rx="3" class="f-accent"/>
+<text x="605.3" y="384.0" font-size="12" text-anchor="end" class="t-ink">0.94</text>
+<text x="796.0" y="384.5" font-size="12" text-anchor="end" class="t-muted">n=1 vs 1</text>
+<text x="260.0" y="420.5" font-size="13" text-anchor="end" class="t-ink">player adapter: frame steady p50</text>
+<rect x="585.8" y="408.0" width="31.0" height="16.0" rx="3" class="f-accent"/>
+<text x="580.8" y="420.0" font-size="12" text-anchor="end" class="t-ink">0.75</text>
+<text x="796.0" y="420.5" font-size="12" text-anchor="end" class="t-muted">n=2 vs 2</text>
+<text x="24.0" y="474.0" font-size="12" text-anchor="start" class="t-muted">Every row: ranges separate. With no real difference that happens 33% of the time for 2 vs 2 and always for 1 vs 1 (the greyed row). This shows</text>
+<text x="24.0" y="490.0" font-size="12" text-anchor="start" class="t-muted">the report&#x27;s shape, not a benchmark result.</text>
+</svg>

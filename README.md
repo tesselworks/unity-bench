@@ -1,10 +1,32 @@
 # Unity Bench
 
-Compare the same Unity project across Editor versions or player scripting backends, with a fixed A/B schedule, fresh processes, and per-process medians. It ships built-in workloads that work on any project (open, script edit, Play Mode, player build, player startup) and a small adapter API, for the Editor and for built players, for your own.
+[![Tests](https://github.com/tesselworks/unity-bench/actions/workflows/python.yml/badge.svg)](https://github.com/tesselworks/unity-bench/actions/workflows/python.yml)
+[![Release](https://img.shields.io/github/v/release/tesselworks/unity-bench)](https://github.com/tesselworks/unity-bench/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
-It was built for a Unity 6.7 (Mono) vs Unity 7 (CoreCLR) comparison. MatterKit, a physics and fracture library, is the first consumer: its scenarios plug in as Editor and player adapters (the MatterKit source is private, so those adapters live in its own repository). License: MIT.
+Compare the same Unity project across Editor versions or player scripting backends. It was built for a Unity 6.7 (Mono) vs Unity 7 (CoreCLR) comparison; MatterKit, a physics and fracture library, is its first consumer (its adapters live in its own, private repository).
 
-What it does differently from a strict benchmark harness: it **annotates instead of refusing**. Host CPU and memory are recorded next to each measurement; work and output hashes are compared and flagged, with the coverage that backs "same"; first-use samples are labelled; every run records the commits, Editors and player settings that produced it. Nothing blocks a run and nothing is deleted. Cache state is a core feature: every workload names its start state (`cold`, `warm`, `as-is`), prepared project copies are snapshotted and reused between campaigns and runs, and the state each process really had is recorded. See [docs/methodology.md](docs/methodology.md), including how to read a report and how to regenerate a published one from its raw data.
+## How it works
+
+```mermaid
+flowchart LR
+  C["campaign.toml<br/>variants,<br/>workloads"] --> P["plan<br/>balanced<br/>A/B order"]
+  P --> R["run<br/>a fresh process<br/>per repeat"]
+  R --> D[("results.jsonl<br/>campaign.json")]
+  D --> S["report<br/>medians, ranges,<br/>ratios, annotations"]
+```
+
+A campaign names the variants (a project revision, an Editor, a player backend) and the workloads. The order is fixed before anything runs, every repeat is a new process with a timeout, and the raw rows are never filtered: `unity-bench report` regenerates the summary from them at any time, with other options. Details: [methodology](docs/methodology.md).
+
+## Annotate, don't refuse
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/annotated-row-dark.svg">
+  <img alt="One row of a report with four annotations: host load recorded, first-use samples set apart, ranges separate with the chance of that for n=2 vs 2, work identity same with its coverage" src="docs/figures/annotated-row-light.svg" width="860">
+</picture>
+
+Nothing blocks a run and nothing is deleted. Host CPU and memory are recorded next to each process; work and output hashes are compared and flagged, with the coverage that backs "same"; first-use samples are labelled; every run records the commits, Editors and player settings that produced it.
 
 ## Quickstart (about 5 minutes)
 
@@ -31,13 +53,23 @@ You need Python 3.11+, one or more Unity Editors with a valid license, and eithe
    python3 unity-bench.py report bench-runs/minimal-example-... --first-use-ratios --bootstrap 1000
    ```
 
-5. Run it again. The second run does not prepare the project copies: it restores the prepared copies from the cache (`prepared: reused <key>` in the report), and `unity-bench cache list` shows what is kept. A workload can say where each of its processes starts (`state = "cold" | "warm" | "as-is"`, see [methodology](docs/methodology.md#cache-states)); `warm` puts the prepared copy back before every process, `cold` also isolates the global caches Unity lets us isolate.
+5. Run it again. The second run does not prepare the project copies: it restores the prepared copies from the cache (`prepared: reused <key>` in the report), and `unity-bench cache list` shows what is kept (see [Cache states](#cache-states)).
 
 To measure your own project: point `[project] path` at it, list your Editors under `[[variants]]`, and keep the workloads you want. Say which items are the result with `headline` on a workload; there is no aggregate over everything. For project-specific work, write an [adapter](docs/adapters.md).
 
 `pip install .` installs the `unity-bench` command and carries the Unity package inside the wheel; `pip install -e .` (or running `python3 unity-bench.py` from a checkout) uses `packages/` in place. Unity Bench never installs Editors or Unity modules.
 
 ## Workloads
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/workloads-dark.svg">
+  <img alt="Grid of workload kinds: Editor and Player rows; columns no code (built-in workloads), hooks in the game (scene workloads plus Bench calls) and C# adapter; the bottom row shows that hooks and adapters make the work column read same, differs or partial" src="docs/figures/workloads-light.svg" width="860">
+</picture>
+
+**Zero-code start, hooks when you need verified work.** Point a `player.scene` (or `editor.scene_play`) workload at your main scene and you get frame percentiles and the profiler markers each backend offers, labelled "work not verified". Add `Bench.Mark("bodies", n)` (and `Bench.Hash`, `Bench.Begin/End`) to the game and the same workload compares your counters and reads "same" or "differs", with no rewrite as an adapter ([Scene hooks](docs/adapters.md#scene-hooks)). Details and keys: [docs/workloads.md](docs/workloads.md).
+
+<details>
+<summary>What each workload measures</summary>
 
 | Kind | Measures |
 | --- | --- |
@@ -51,13 +83,45 @@ To measure your own project: point `[project] path` at it, list your Editors und
 | `player.adapter` | your C# entry point inside a built player, over many frames: samples, p50/p95/p99/max distributions with warm-up kept apart, work counters, output hash |
 | `player.scene`, `editor.scene_play` | **no code needed**: play a scene in a built player or in Play Mode and record frame time, `ProfilerRecorder` markers (main thread, PlayerLoop, physics, rendering, scripts, GC) and memory. Optional hook calls in the game make the work verified |
 
-Details and keys: [docs/workloads.md](docs/workloads.md). Every Editor workload and the scene workloads also report a memory breakdown (managed heap / Unity native / graphics / process) as an annotation ([Memory readings](docs/workloads.md#memory-readings)).
+Every Editor workload and the scene workloads also report a memory breakdown (managed heap / Unity native / graphics / process) as an annotation ([Memory readings](docs/workloads.md#memory-readings)).
 
-**Zero-code start, hooks when you need verified work.** To see how your main scene runs on Editor or backend B against A, point a `player.scene` (or `editor.scene_play`) workload at it: no code in the project, and you get frame percentiles and the profiler markers each backend offers. Such a table says "work not verified", because nothing tells it the variants did the same work. When that matters, add `Bench.Mark("bodies", n)` (and `Bench.Hash`, `Bench.Begin/End` for your own segments) to the game: the same workload then compares your counters and reads "same" or "differs", with no rewrite as an adapter ([Scene hooks](docs/adapters.md#scene-hooks)).
+</details>
+
+## Cache states
+
+```mermaid
+flowchart LR
+  subgraph once["once per variant, kept across runs"]
+    A["project copy,<br/>Unity package,<br/>project.prepare"] --> B["priming open<br/>(untimed)"]
+    B --> S[("snapshot<br/>keyed by content")]
+  end
+  S --> W["warm<br/>snapshot restored<br/>before each process"]
+  S --> X["as-is<br/>what the previous<br/>process left"]
+  S --> C["cold<br/>no Library, empty<br/>global caches"]
+```
+
+A later run with the same key restores the snapshot instead of preparing again. Every workload that starts an Editor names its start state (`state = "cold" | "warm" | "as-is"`), and every process records the state it really had; a state that cannot be set up runs `as-is` with a note. `cold` never touches your own caches: it points them at empty directories for that one process. The OS file cache, the GPU driver's shader cache and the GI cache are not controlled. More: [methodology](docs/methodology.md#cache-states).
 
 ## Sample report
 
-Rows from one run of `examples/minimal.toml`, 6000.7.0b2 (Mono) against 7000.0.0a9 (CoreCLR), on 2026-10-19: an Apple M4 Max MacBook Pro (16 CPUs, 48 GB, macOS 26.5.2), unity-bench 0.7.0 at `75171c1`, with `repeats = 2` and `rounds = 3` (the opens 3 repeats, `reload-leak` 10 cycles, `play-leak` 5), 68 processes in 13 minutes, none failed. **The machine was not idle**: other sessions were using it, the load average was 20 with no Unity running just before the start and 17 to 27 in once-a-minute samples during the run, and the report's host table gives machine CPU median 57% (6.7) and 67% (7), max 100%, of which about 42% was other work. Cells are median [min-max] across processes, n = processes after the first-use process is set aside; the ratio is Unity 7 / Unity 6.7. This shows what the report looks like. It is not a benchmark result: n is 1 to 2 and the machine was busy.
+One run of `examples/minimal.toml` on 2026-10-19: 6000.7.0b2 (Mono) against 7000.0.0a9 (CoreCLR) on an Apple M4 Max MacBook Pro that was also running other work, unity-bench 0.7.0 at `75171c1`, `repeats = 2`, 68 processes, none failed. It shows what the report looks like. It is not a benchmark result: n is 1 to 2 and the machine was busy.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/sample-ratios-dark.svg">
+  <img alt="Bar chart of Unity 7 / Unity 6.7 ratios on a log axis: cold open 1.21, warm open 1.33, core compile+reload 1.51, Play Mode enter 2.00 with domain reload and 1.43 without, Editor adapter xorshift 0.56 and sha256 0.07, player launch_to_probe 0.94 (n=1 vs 1), player adapter frame steady p50 0.75" src="docs/figures/sample-ratios-light.svg" width="820">
+</picture>
+
+The leak workloads open with their result instead of a ratio. The same report shape caught a real leak: the control run for [#18](https://github.com/tesselworks/unity-bench/issues/18) compared an Editor that leaks every script reload (7000.0.0a7) with the fixed one (7000.0.0a9) and 6.7.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/leak-control-dark.svg">
+  <img alt="Two line charts over ten script reloads. Unloaded contexts still alive: 7000.0.0a7 climbs 1 to 10, 7000.0.0a9 stays 0, 6.7 is not counted. App Resident Memory: 7000.0.0a7 grows 121 MB per reload from 721 MB to 1,810 MB; 7000.0.0a9 +0.3 MB and 6.7 +4.0 MB per reload stay flat" src="docs/figures/leak-control-light.svg" width="860">
+</picture>
+
+<details>
+<summary>The tables behind the charts, and what else a report holds</summary>
+
+The run behind the first chart: the opens ran 3 repeats, `reload-leak` 10 cycles, `play-leak` 5, in 13 minutes. The load average was 20 with no Unity running just before the start and 17 to 27 in once-a-minute samples during the run; the report's host table gives machine CPU median 57% (6.7) and 67% (7), max 100%, of which about 42% was other work. Cells are median [min-max] across processes, n = processes after the first-use process is set aside; the ratio is Unity 7 / Unity 6.7.
 
 | Item | unity-6.7 (A) | unity-7 | unity-7 / unity-6.7 | Work |
 | --- | --- | --- | --- | --- |
@@ -71,14 +135,45 @@ Rows from one run of `examples/minimal.toml`, 6000.7.0b2 (Mono) against 7000.0.0
 | player launch_to_probe | 377 [377-377] n=1 | 355 [355-355] n=1 | 0.94 (ranges separate, n=1 vs 1) | not reported |
 | player adapter: frame steady p50 | 0.803 [0.799-0.807] n=2 | 0.599 [0.599-0.599] n=2 | 0.75 (ranges separate, n=2 vs 2) | not reported |
 
-Under each table the report prints how often ranges separate by chance for the n involved (33% for 2 vs 2, 100% for 1 vs 1). The leak workloads open with their result instead of a ratio; here `reload-leak` read:
+Under each table the report prints how often ranges separate by chance for the n involved (33% for 2 vs 2, 100% for 1 vs 1). In the same run, `reload-leak` read:
 
 | Variant | App Resident Memory per cycle | First to last (median) | Unloaded contexts still alive (last cycle, median) | Points x processes |
 | --- | --- | --- | --- | --- |
 | unity-6.7 | +3.359 MB [+2.991 MB to +3.728 MB] | 414.6 MB to 448.5 MB | not counted (no collectible contexts: Mono) | 10 x 2 |
 | unity-7 | +2.907 MB [+2.809 MB to +3.005 MB] | 620.0 MB to 647.4 MB | 0 of 10 | 10 x 2 |
 
-The full report also lists the variants with their resolved project commits and Editor versions, the players' own runtime, build kind and build settings, the start state of every workload and how each prepared copy was made, first-use samples, per-phase reload tables, the memory breakdown of every Editor workload, frame and profiler-marker distributions of the scene workloads, items whose work or output differed (shown apart, left out of the ratios), a headline aggregate for the items you named, host annotations and failed processes. The raw `results.jsonl` and `campaign.json` of this run are not in the repository (run directories stay out of git).
+The leak control in the second chart (framework at `4b190dd`, 2 processes per Editor, machine CPU median 36 to 39%; `reload-leak` 10 reloads, `play-leak` 5 cycles with domain reload on):
+
+| | 6000.7.0b2 (Mono) | 7000.0.0a7 (CoreCLR, leaks) | 7000.0.0a9 (CoreCLR, fixed) |
+| --- | --- | --- | --- |
+| reload: `App Resident Memory` per reload | +4.0 MB [1.3, 6.6] | +121.0 MB [120.3, 121.6] (721 MB to 1.77 GB) | +0.3 MB [-1.8, 2.5] |
+| reload: `Unloaded contexts still alive` after reload 1, 2, ..., 10 | not counted | 1, 2, ..., 10 (both processes) | 0 at every reading |
+| Play Mode: `App Resident Memory` per cycle | +5.1 MB | +117.7 MB | +3.1 MB |
+| Play Mode: `Unloaded contexts still alive` after 5 cycles | not counted | 5 of 5 | 0 of 5 |
+
+The full report also lists the variants with their resolved project commits and Editor versions, the players' own runtime, build kind and build settings, the start state of every workload and how each prepared copy was made, first-use samples, per-phase reload tables, the memory breakdown of every Editor workload, frame and profiler-marker distributions of the scene workloads, items whose work or output differed (shown apart, left out of the ratios), a headline aggregate for the items you named, host annotations and failed processes. The raw `results.jsonl` and `campaign.json` of these runs are not in the repository (run directories stay out of git); the numbers the charts use are in [docs/figures/data](docs/figures/data).
+
+</details>
+
+## Case studies
+
+**MatterKit, Unity 6.7 vs Unity 7 alpha 9.** The comparison Unity Bench was built for, run by MatterKit's own CI on one Windows PC (other jobs paused while measuring). A write-up with the method and the findings will be linked here when it is published.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/case-matterkit-editor-dark.svg">
+  <img alt="MatterKit in the Editor, Unity 7 / Unity 6.7: 60 C# scenarios 0.48 (Release) and 0.65 (Debug), Enter Play Mode 0.75, open project without Library 0.90, Core API edit to reload done 1.05, Exit Play Mode 2.43" src="docs/figures/case-matterkit-editor-light.svg" width="820">
+</picture>
+
+In the Editor, MatterKit's pure C# scenarios ran in about half the time on the CoreCLR Editor, while editing a script and waiting for the reload stayed where it was.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/case-matterkit-player-dark.svg">
+  <img alt="MatterKit players relative to Unity 6.7 IL2CPP, Unity 7 IL2CPP and Unity 7 CoreCLR: clean build 0.94 and 0.23, catalog 1.05 and 0.84, table frame median 1.01 and 0.95, 4 bottles break at once (Mac, alpha 7) not measured and 0.39, launch to first frame 1.03 and 1.53, first cut after start 2.07 and 2.82" src="docs/figures/case-matterkit-player-light.svg" width="820">
+</picture>
+
+In players, CoreCLR built about four times faster and was mostly faster on long runs, but paid for JIT the first time code ran (launch, first cut); Unity 7 IL2CPP stayed close to 6.7 IL2CPP.
+
+**Spill**, a physics incremental game (Entities, Unity Physics, URP), is the second case: the same two Editors and three player backends, measured overnight by its own CI. Its campaigns are private.
 
 ## Honest limits
 
@@ -110,5 +205,6 @@ A result made with Unity Bench can be re-aggregated without Unity from its raw `
 - `packages/com.tesselworks.unity-bench/` Unity package: `Editor/` batch entry and adapter API, `Runtime/` the inert-unless-asked player side
 - `examples/` a tiny Unity project with one custom adapter and a campaign that exercises every built-in workload
 - `docs/` [methodology](docs/methodology.md) (including how to read results and how to reproduce a published one), [adapters and result schema](docs/adapters.md), [workloads](docs/workloads.md), [pre-release checklist](docs/public-repository.md); [CHANGELOG](CHANGELOG.md)
+- `docs/figures/` the README and docs figures: `python3 docs/figures/make_figures.py` regenerates them from `docs/figures/data/`
 
 Tests need no Unity: `python3 -I -m unittest discover -s tests`.

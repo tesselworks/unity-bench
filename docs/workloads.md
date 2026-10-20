@@ -72,6 +72,23 @@ The report shows how many assemblies each edit compiled (annotation) and whether
 
 For this workload, `editor.play` and `editor.adapter`, the runner parses the Editor log of every process and attributes each block to the step whose `[UnityBench] begin/end` markers enclose it:
 
+```mermaid
+flowchart LR
+  subgraph DR["Domain Reload Profiling: total (one block per reload in the Editor log)"]
+    direction LR
+    B["BeginReloadAssembly<br/>unload the old code"] --> LA
+    subgraph LA["LoadAllAssembliesAndSetupDomain"]
+      direction TB
+      L1["LoadAssemblies"] --> L2["TypeCache.Refresh<br/>TypeCache.ScanAssembly"]
+    end
+    LA --> FR
+    subgraph FR["FinalizeReload"]
+      direction TB
+      F1["SetupLoadedEditorAssemblies"] --> F2["ProcessInitializeOnLoadAttributes<br/>ProcessInitializeOnLoadMethodAttributes"]
+    end
+  end
+```
+
 - `Domain Reload Profiling: Nms` blocks: the total and the phases `BeginReloadAssembly`, `LoadAllAssembliesAndSetupDomain`, `TypeCache.ScanAssembly`, `FinalizeReload` and `ProcessInitializeOnLoadAttributes` (all phases are stored in `results.jsonl`),
 - `Asset Pipeline Refresh ... Scripting: domain reloads=N, domain reload time=X ms, compile time=Y ms`.
 
@@ -100,6 +117,16 @@ Every Editor process that runs a built-in workload through the package (everythi
 ## editor.reload_leak and editor.play_leak
 
 Does an Editor keep growing when the same code is reloaded again and again? One Editor process runs N cycles and reads its memory after every one; the report fits a line through the readings.
+
+```mermaid
+flowchart LR
+  E["one cycle:<br/>script edit, or<br/>Play Mode in and out"] --> I["wait until<br/>the Editor<br/>is idle"]
+  I --> G["force_gc:<br/>collect garbage,<br/>unload assets"]
+  G --> M["read every<br/>memory counter"]
+  M --> V["CoreCLR: count<br/>old code generations<br/>still alive"]
+  V -- "next cycle" --> E
+  V -. "after N" .-> R["report:<br/>slope per cycle,<br/>contexts alive"]
+```
 
 ```toml
 [[workloads]]
@@ -230,6 +257,17 @@ Also stored: the process's host RSS (sampled once a second, a lower bound of the
 ### Work: verified or not
 
 The frames and markers say how the scene ran, not that two variants ran the same scene. Without hook calls from the game the report labels every item **work not verified**. When the game calls `Bench.Mark`, `Bench.Hash` (see [Scene hooks](adapters.md#scene-hooks)), those counters and hash become the scene's work identity, attached to every item of the workload, and the Work column reads `same` / `differs` / `partial` like for adapters. Add the calls later and the same workload becomes verified; no workload has to be rewritten as an adapter.
+
+```mermaid
+flowchart LR
+  W["player.scene or<br/>editor.scene_play"] --> L["load the scene,<br/>warm-up"]
+  L --> R["record the steady phase: frame time,<br/>ProfilerRecorder markers, GC, memory"]
+  G["game code, optional:<br/>Bench.Mark, Bench.Hash,<br/>Bench.Begin and End"] -.-> R
+  R --> Q{"any Mark<br/>or Hash?"}
+  Q -- "no" --> NV["every item:<br/>work not verified"]
+  Q -- "yes" --> V["work group scene, inherited<br/>by every item: same,<br/>differs or partial"]
+  R --> SEG["Begin and End calls:<br/>segment name steady<br/>p50, p95, p99, max"]
+```
 
 ## Preparing the project copy
 
